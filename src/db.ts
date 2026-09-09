@@ -348,16 +348,38 @@ export class Db {
     return rowToItem(r);
   }
 
-  patchItem(id: number, patch: { status?: ItemStatus; jobId?: string | null; title?: string | null; author?: string | null }): LibraryItem | null {
+  patchItem(id: number, patch: {
+    status?: ItemStatus; jobId?: string | null; title?: string | null; author?: string | null;
+    seriesKey?: string; volumeFrom?: number | null; volumeTo?: number | null;
+  }): LibraryItem | null {
     const cur = this.getItem(id);
     if (!cur) return null;
     const status = patch.status ?? cur.status;
     const jobId = patch.jobId === undefined ? cur.jobId : patch.jobId;
     const title = patch.title === undefined ? cur.title : patch.title;
     const author = patch.author === undefined ? cur.author : patch.author;
-    this.db.prepare('UPDATE items SET status=?, job_id=?, title=?, author=?, updated_at=? WHERE id=?')
-      .run(status, jobId, title, author, now(), id);
+    // series_key と巻数まで書き換えられるのは管理画面から直す時だけ。
+    // タイトルを直してもキーが元のままだと、直したつもりで何も変わらない
+    const seriesKey = patch.seriesKey ?? cur.seriesKey;
+    const from = patch.volumeFrom === undefined ? cur.volumeFrom : patch.volumeFrom;
+    const to = patch.volumeTo === undefined ? cur.volumeTo : patch.volumeTo;
+    this.db.prepare('UPDATE items SET status=?, job_id=?, title=?, author=?, series_key=?, volume_from=?, volume_to=?, updated_at=? WHERE id=?')
+      .run(status, jobId, title, author, seriesKey, from, to, now(), id);
     return this.getItem(id);
+  }
+
+  /**
+   * 同じ作品の行をまとめて付け替える。
+   *
+   * series_key はタイトルから導くので、作品名を入れ直すと**散らばっていたキーが 1 つに集まる**。
+   * 作品名の分からないまま投入されて、生の文字列 (ミラーのホスト名まで含む) からキーが
+   * 作られてしまった行を救う道がこれ — 1 行ずつ直すと、直した分から別のキーへ移ってしまう。
+   */
+  relabelSeries(userId: number, seriesKey: string, next: { seriesKey: string; title: string; author: string | null }): number {
+    const r = this.db
+      .prepare('UPDATE items SET series_key=?, title=?, author=?, updated_at=? WHERE user_id=? AND series_key=?')
+      .run(next.seriesKey, next.title, next.author, now(), userId, seriesKey);
+    return Number(r.changes);
   }
 
   /** 合流の記録を積む。どのサイトから同じ巻が来たかを後から追えるようにする */
@@ -372,6 +394,13 @@ export class Db {
 
   deleteItem(id: number): boolean {
     return this.db.prepare('DELETE FROM items WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** まとめて消す。1 作品ぶんの行を片付けるのに 1 行ずつ叩かせない */
+  deleteItems(ids: number[]): number {
+    if (ids.length === 0) return 0;
+    const marks = ids.map(() => '?').join(',');
+    return Number(this.db.prepare(`DELETE FROM items WHERE id IN (${marks})`).run(...ids).changes);
   }
 
   /** ジョブを消した時の後始末。完走していない台帳は所持の証拠にならないので落とす */

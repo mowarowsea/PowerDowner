@@ -107,5 +107,38 @@ table.users td { padding: 4px; }
 table.users input { width: 100%; }
 table.users td:last-child { width: 130px; white-space: nowrap; }
 
+/* 台帳の管理画面。行数が読めないので、一覧だけを内側でスクロールさせる */
+#itemsDialog { width: min(1000px, 96vw); }
+.nowrap { white-space: nowrap; }
+.row input.vol { flex: 0 0 150px; }
+.ledger { margin-top: 8px; max-height: 50vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.series { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.series.bad { border-color: var(--bad); }
+.shead { display: flex; align-items: baseline; gap: 8px; }
+/* 作品名は壊れていると 1 行に収まらないほど長い (ファイル名がそのまま入る)。
+   伸ばすと右のボタンが画面の外へ押し出されるので、ここで詰める */
+.shead .stitle { flex: 1 1 auto; min-width: 6ch; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shead .stitle .none { color: var(--bad); font-weight: 500; }
+.shead .sauthor { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+.shead .skey { flex: 0 1 auto; color: var(--muted); font-size: 11px; font-family: ui-monospace, Consolas, monospace;
+  max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shead .swarn { flex: none; color: var(--bad); font-size: 12px; white-space: nowrap; }
+.shead button { flex: none; }
+.sedit { display: flex; gap: 6px; margin-top: 8px; }
+/* hidden 属性より .sedit の display が強いので、明示的に打ち消す */
+.sedit[hidden] { display: none; }
+.sedit input { flex: 1; }
+.lrows { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.lrow { display: grid; grid-template-columns: 68px 110px 1fr auto; gap: 8px; align-items: baseline;
+  padding: 3px 0; border-top: 1px solid var(--border); }
+.lrow .vol { font-variant-numeric: tabular-nums; }
+.lrow .lmeta { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lrow .lwarn { grid-column: 2 / -1; color: var(--bad); font-size: 12px; white-space: pre-wrap; }
+.lacts { display: flex; gap: 4px; }
+.badge.i-have { border-color: var(--wait); color: var(--wait); }
+.badge.i-done { border-color: var(--ok); color: var(--ok); }
+.badge.i-pending { border-color: var(--accent); color: var(--accent); }
+
 .log { max-width: 1100px; margin: 0 auto; padding: 0 16px 24px; }
 .log pre { margin: 0; font-size: 11px; color: var(--muted); max-height: 140px; overflow: auto; white-space: pre-wrap; }

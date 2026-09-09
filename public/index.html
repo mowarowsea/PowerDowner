@@ -19,6 +19,7 @@
       <span>ユーザー</span>
       <select id="userSelect"></select>
     </label>
+    <button id="btnItems" class="ghost">台帳</button>
     <button id="btnUsers" class="ghost">ユーザー / 設定</button>
   </header>
 
@@ -71,6 +72,39 @@
       </div>
 
       <div id="dialogError" class="error" hidden></div>
+      <div class="row end">
+        <button value="close" class="ghost">閉じる</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="itemsDialog">
+    <form method="dialog" class="dialog">
+      <h2>台帳 <span id="itemsOwner" class="hint"></span></h2>
+      <p class="hint">
+        「もう持っている」の記録です。ここに載っている巻は、DryEyes から投入されても落としません。<br>
+        <strong>落とし直したい時は、その行を消してください。</strong>
+        作品名を直すと series キーを導き直すので、ばらばらのキーになっていた行が 1 つにまとまります。
+      </p>
+      <div class="row">
+        <input id="itemFilter" type="text" placeholder="作品名・ファイル名・投入元で絞り込み">
+        <label class="toggle"><input type="checkbox" id="itemOnlyBad"> 要確認だけ</label>
+        <span id="itemsSummary" class="hint nowrap"></span>
+        <button type="button" id="btnItemsReload" class="ghost small">再読み込み</button>
+      </div>
+      <div id="itemsList" class="ledger"></div>
+      <div id="itemsEmpty" class="empty" hidden></div>
+
+      <h2>手元にある巻を登録</h2>
+      <p class="hint">紙で買った巻や、別の手段で入手済みの巻を入れておくと、投入されても落としません。範囲で入れると 1 巻ずつに分かれます。</p>
+      <div class="row">
+        <input id="newItemTitle" type="text" placeholder="作品名">
+        <input id="newItemAuthor" type="text" placeholder="作者 (任意)">
+        <input id="newItemVolumes" type="text" placeholder="巻数 (3 または 1-7)" class="vol">
+        <button type="button" id="btnNewItem" class="primary small">登録</button>
+      </div>
+
+      <div id="itemsError" class="error" hidden></div>
       <div class="row end">
         <button value="close" class="ghost">閉じる</button>
       </div>

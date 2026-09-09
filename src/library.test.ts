@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Db } from './db.js';
-import { decideItem, missingVolumes } from './library.js';
+import { decideItem, diagnoseItems, missingVolumes } from './library.js';
+import type { Job } from './types.js';
 import { seriesKeyOf } from './volume.js';
 
 /** 台帳はユーザー単位なので、持ち主を 1 人用意してから始める */
@@ -120,4 +121,98 @@ test('合流も自分の台帳の中だけで起きる', () => {
   assert.equal(decideItem(db, 1, { urls: ['https://b/7'], meta: { title: '作品名 第7巻' } }).kind, 'merge');
   // 別のユーザーの落としかけに相乗りすると、保存先が違うので手元に来ない
   assert.equal(decideItem(db, 2, { urls: ['https://b/7'], meta: { title: '作品名 第7巻' } }).kind, 'new');
+});
+
+// ---- 管理画面向けの診断 ---------------------------------------------------
+// 台帳は「持っている」と言い切る場所なので、間違った行は黙ってその巻を落とせなくする。
+// 画面から直せるようにする前に、どれが怪しいのかを言えないと直しようがない。
+
+/** ジョブの引き当てだけを差し替える。ここで見たいのは台帳の側の見立て */
+const jobLookup = (jobs: Partial<Job>[]) => (id: string): Job | null =>
+  (jobs.find((j) => j.id === id) as Job | undefined) ?? null;
+
+test('診断: 何も問題の無い行には印が付かない', () => {
+  const db = tmpDb();
+  own(db, 1, 6, 'have');
+  const [d] = diagnoseItems(db.listItems({ userId: USER }), () => null);
+  assert.deepEqual(d.warnings, []);
+  assert.equal(d.job, null);
+});
+
+test('診断: pending のままジョブが消えた行を捕まえる', () => {
+  const db = tmpDb();
+  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: 7, volumeTo: 7, status: 'pending', jobId: 'gone', title: '作品名' });
+  const [d] = diagnoseItems(db.listItems({ userId: USER }), () => null);
+  // この行が残っている限り、同じ巻の投入は全部ここへ合流して何も落ちない
+  assert.equal(d.warnings.length, 1);
+  assert.match(d.warnings[0], /ジョブが残っていません/);
+});
+
+test('診断: 失敗で終わったジョブを指したままの行を捕まえる', () => {
+  const db = tmpDb();
+  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: 7, volumeTo: 7, status: 'pending', jobId: 'j1', title: '作品名' });
+  const [d] = diagnoseItems(
+    db.listItems({ userId: USER }),
+    jobLookup([{ id: 'j1', status: 'failed', filename: null, error: '全滅' }])
+  );
+  assert.match(d.warnings[0], /失敗で終わっています/);
+  assert.equal(d.job?.status, 'failed');
+});
+
+test('診断: 走っている最中のジョブは問題にしない', () => {
+  const db = tmpDb();
+  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: 7, volumeTo: 7, status: 'pending', jobId: 'j1', title: '作品名' });
+  const [d] = diagnoseItems(
+    db.listItems({ userId: USER }),
+    jobLookup([{ id: 'j1', status: 'downloading', filename: 'x.rar', error: null }])
+  );
+  assert.deepEqual(d.warnings, []);
+});
+
+test('診断: 作品名が無い行と巻数を読めていない行を捕まえる', () => {
+  const db = tmpDb();
+  // 作品名が分からないまま投入されると、キーが生の文字列 (ミラーのホスト名込み) から作られる
+  db.insertItem({ userId: USER, seriesKey: 'v0102rarkatfileturbobit', volumeFrom: 1, volumeTo: 2, status: 'done', title: null, rawText: 'v01-02.rar katfile turbobit' });
+  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: null, volumeTo: null, status: 'have', title: '作品名' });
+
+  const found = diagnoseItems(db.listItems({ userId: USER }), () => null);
+  const noTitle = found.find((d) => d.title === null)!;
+  const noVolume = found.find((d) => d.volumeFrom === null)!;
+  assert.match(noTitle.warnings.join(), /別サイトから来た同じ巻と噛み合いません/);
+  assert.match(noVolume.warnings.join(), /重複の判定に参加していません/);
+});
+
+test('診断: ファイル名がそのまま作品名になっている行を捕まえる', () => {
+  const db = tmpDb();
+  // 作品名として入ってはいるが中身はファイル名。キーが落とすのは巻数だけなので、
+  // 拡張子もミラーのホスト名もキーに残り、他所から来た同じ巻と噛み合わない
+  db.insertItem({
+    userId: USER, seriesKey: 'x', volumeFrom: 1, volumeTo: 2, status: 'have',
+    title: 'Isekai machikoba muso v01-02s.rar katfile rapidgator',
+  });
+  const [d] = diagnoseItems(db.listItems({ userId: USER }), () => null);
+  assert.match(d.warnings.join(), /作品名にファイル名が入っています/);
+
+  // 普通の作品名は疑わない
+  const ok = tmpDb();
+  own(ok, 1, 1);
+  assert.deepEqual(diagnoseItems(ok.listItems({ userId: USER }), () => null)[0].warnings, []);
+});
+
+test('診断: 同じ巻を指す行が 2 つあれば両方に印が付く', () => {
+  const db = tmpDb();
+  const a = own(db, 1, 6);
+  const b = own(db, 3, 3);
+  const found = diagnoseItems(db.listItems({ userId: USER }), () => null);
+  assert.match(found.find((d) => d.id === a.id)!.warnings.join(), new RegExp(`id ${b.id}`));
+  assert.match(found.find((d) => d.id === b.id)!.warnings.join(), new RegExp(`id ${a.id}`));
+});
+
+test('診断: 他人の同じ巻は重複と見なさない (台帳はユーザー単位)', () => {
+  const db = tmpDb();
+  db.createUser('もう一人', null);
+  own(db, 1, 6, 'have', 1);
+  own(db, 1, 6, 'have', 2);
+  const found = diagnoseItems(db.listItems(), () => null);
+  assert.deepEqual(found.flatMap((d) => d.warnings), []);
 });

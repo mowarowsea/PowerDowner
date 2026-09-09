@@ -98,6 +98,166 @@
     $('civitaiTokenState').textContent = state.settings.civitaiToken ? `設定済み (${state.settings.civitaiToken})` : '未設定';
   }
 
+  // ---- 台帳 --------------------------------------------------------------
+  // 台帳は「持っている」と言い切る場所なので、間違った行が 1 つあるだけで、その巻は
+  // 投入されても二度と落ちてこない。直すのも消すのもここで完結させる。
+  // ジョブ一覧と違って勝手に動かないので、開いた時と操作した後にだけ読み直す。
+  const ledger = { items: [], filter: '', onlyBad: false };
+  const ITEM_STATUS = { have: '所持', done: '取得済', pending: 'DL中' };
+
+  const volLabel = (r) =>
+    r.volumeFrom === null ? '巻数不明'
+    : r.volumeFrom === r.volumeTo ? `第${r.volumeFrom}巻`
+    : `第${r.volumeFrom}-${r.volumeTo}巻`;
+  const volValue = (r) =>
+    r.volumeFrom === null ? '' : r.volumeFrom === r.volumeTo ? String(r.volumeFrom) : `${r.volumeFrom}-${r.volumeTo}`;
+
+  async function loadLedger() {
+    if (state.userId === null) { ledger.items = []; renderLedger(); return; }
+    ledger.items = (await api('GET', `/api/items?userId=${state.userId}&limit=2000`)).items;
+    renderLedger();
+  }
+
+  // 操作 → 読み直し。台帳を直すと他の行の警告 (重複や合流先) まで変わるので、
+  // 手元で継ぎ足さずサーバーの見立てごと入れ替える
+  async function ledgerAction(fn) {
+    const err = $('itemsError');
+    err.hidden = true;
+    try {
+      await fn();
+      await loadLedger();
+    } catch (e) {
+      err.textContent = e.message;
+      err.hidden = false;
+      try { await loadLedger(); } catch { /* 表示済みのメッセージを上書きしない */ }
+    }
+  }
+
+  function ledgerGroups() {
+    const q = ledger.filter.trim().toLowerCase();
+    const map = new Map();
+    for (const it of ledger.items) {
+      let g = map.get(it.seriesKey);
+      if (!g) { g = { key: it.seriesKey, rows: [] }; map.set(it.seriesKey, g); }
+      g.rows.push(it);
+    }
+    const groups = [];
+    for (const g of map.values()) {
+      // 群の代表名は一番短い非空のタイトル。同じキーでも「作品名 第3巻」と「作品名 4-8巻」が
+      // 混ざるので、巻数の付いた長いほうを避けるための当て推量
+      const titles = g.rows.map((r) => (r.title || '').trim()).filter(Boolean).sort((a, b) => a.length - b.length);
+      g.title = titles[0] || '';
+      g.author = (g.rows.find((r) => r.author) || {}).author || '';
+      g.warnings = g.rows.reduce((n, r) => n + r.warnings.length, 0);
+      if (ledger.onlyBad && g.warnings === 0) continue;
+      if (q) {
+        const hay = [g.title, g.author, g.key, ...g.rows.map((r) =>
+          [r.rawText, r.source, r.job && r.job.filename].filter(Boolean).join(' '))].join(' ').toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+      g.rows.sort((a, b) => (a.volumeFrom ?? -1) - (b.volumeFrom ?? -1) || a.id - b.id);
+      groups.push(g);
+    }
+    groups.sort((a, b) => (a.title || a.key).localeCompare(b.title || b.key, 'ja'));
+    return groups;
+  }
+
+  function renderLedger() {
+    const groups = ledgerGroups();
+    const bad = ledger.items.filter((r) => r.warnings.length > 0).length;
+    const u = state.users.find((x) => x.id === state.userId);
+
+    $('itemsOwner').textContent = u ? `— ${u.name}` : '— (ユーザー未選択)';
+    $('itemsSummary').textContent = `${ledger.items.length} 件` + (bad ? ` / 要確認 ${bad} 件` : '');
+
+    const empty = $('itemsEmpty');
+    empty.hidden = groups.length > 0;
+    empty.textContent =
+      state.userId === null ? 'ユーザーを選んでください。'
+      : ledger.items.length === 0 ? '台帳は空です。ダウンロードが完走すると自動で積まれます。'
+      : '絞り込みに合う行がありません。';
+
+    const root = $('itemsList');
+    root.innerHTML = '';
+    for (const g of groups) root.appendChild(renderSeries(g));
+  }
+
+  function renderSeries(g) {
+    const el = document.createElement('div');
+    el.className = 'series' + (g.warnings ? ' bad' : '');
+    el.innerHTML = `
+      <div class="shead">
+        <div class="stitle">${g.title ? esc(g.title) : '<span class="none">(作品名なし)</span>'}${
+          g.author ? `<span class="sauthor">${esc(g.author)}</span>` : ''}</div>
+        <div class="skey" title="${esc(g.key)}">${esc(g.key)}</div>
+        ${g.warnings ? `<span class="swarn">要確認 ${g.warnings}</span>` : ''}
+        <button type="button" class="small" data-act="edit">作品名を直す</button>
+        <button type="button" class="small ghost" data-act="delall">まとめて消す</button>
+      </div>
+      <div class="sedit" hidden>
+        <input type="text" data-f="title" value="${esc(g.title)}" placeholder="作品名 (巻数は入れなくて構いません)">
+        <input type="text" data-f="author" value="${esc(g.author)}" placeholder="作者 (任意)">
+        <button type="button" class="primary small" data-act="save">保存</button>
+        <button type="button" class="ghost small" data-act="cancel">やめる</button>
+      </div>
+      <div class="lrows"></div>`;
+
+    const edit = el.querySelector('.sedit');
+    el.querySelector('[data-act=edit]').onclick = () => {
+      edit.hidden = !edit.hidden;
+      if (!edit.hidden) edit.querySelector('[data-f=title]').focus();
+    };
+    el.querySelector('[data-act=cancel]').onclick = () => { edit.hidden = true; };
+    el.querySelector('[data-act=save]').onclick = () => ledgerAction(() =>
+      api('POST', '/api/items/relabel', {
+        userId: state.userId,
+        seriesKey: g.key,
+        title: edit.querySelector('[data-f=title]').value,
+        author: edit.querySelector('[data-f=author]').value,
+      }));
+    el.querySelector('[data-act=delall]').onclick = () => {
+      if (!confirm(`「${g.title || '(作品名なし)'}」の ${g.rows.length} 件を台帳から消しますか？\n`
+        + '次に投入された時、また落としに行くようになります (手元のファイルは消えません)。')) return;
+      ledgerAction(() => api('POST', '/api/items/delete', { ids: g.rows.map((r) => r.id) }));
+    };
+
+    const rows = el.querySelector('.lrows');
+    for (const r of g.rows) rows.appendChild(renderLedgerRow(r));
+    return el;
+  }
+
+  function renderLedgerRow(r) {
+    const el = document.createElement('div');
+    el.className = 'lrow';
+    const meta = [
+      r.job ? `ジョブ: ${STATUS_LABEL[r.job.status] || r.job.status}` : (r.jobId ? 'ジョブ: なし' : ''),
+      r.job && r.job.filename,
+      r.source,
+      r.rawText,
+    ].filter(Boolean).join(' · ');
+    el.innerHTML = `
+      <span class="badge i-${r.status}">${ITEM_STATUS[r.status] || r.status}</span>
+      <span class="vol">${esc(volLabel(r))}</span>
+      <span class="lmeta" title="${esc(meta)}">${esc(meta)}</span>
+      <span class="lacts">
+        <button type="button" class="small ghost" data-act="vol" title="読み違えた巻数を直す">巻数</button>
+        <button type="button" class="small ghost" data-act="del" title="この行を消す">×</button>
+      </span>
+      ${r.warnings.length ? `<span class="lwarn">${esc(r.warnings.join('\n'))}</span>` : ''}`;
+
+    el.querySelector('[data-act=vol]').onclick = () => {
+      const v = prompt(`巻数を直します (3 または 1-7)\n${r.title || r.rawText || ''}`, volValue(r));
+      if (v === null) return;
+      ledgerAction(() => api('PATCH', `/api/items/${r.id}`, { volumes: v }));
+    };
+    el.querySelector('[data-act=del]').onclick = () => {
+      if (!confirm(`${volLabel(r)} を台帳から消しますか？\n`
+        + '次に投入された時、また落としに行くようになります (手元のファイルは消えません)。')) return;
+      ledgerAction(() => api('DELETE', `/api/items/${r.id}`));
+    };
+    return el;
+  }
+
   function visibleJobs() {
     const all = [...state.jobs.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     return state.showAll ? all : all.filter((j) => j.userId === state.userId);
@@ -295,9 +455,30 @@
     state.userId = e.target.value ? Number(e.target.value) : null;
     saveUserPick();
     renderJobs();
+    // 台帳はユーザーごとに別物なので、開いたまま切り替えられたら中身も入れ替える
+    if ($('itemsDialog').open) ledgerAction(async () => {});
   };
   $('showAll').onchange = (e) => { state.showAll = e.target.checked; renderJobs(); };
   $('btnUsers').onclick = () => { $('dialogError').hidden = true; $('usersDialog').showModal(); };
+  $('btnItems').onclick = () => {
+    $('itemsDialog').showModal();
+    ledgerAction(async () => {});
+  };
+  $('btnItemsReload').onclick = () => ledgerAction(async () => {});
+  $('itemFilter').oninput = (e) => { ledger.filter = e.target.value; renderLedger(); };
+  $('itemOnlyBad').onchange = (e) => { ledger.onlyBad = e.target.checked; renderLedger(); };
+  $('btnNewItem').onclick = () => ledgerAction(async () => {
+    if (state.userId === null) throw new Error('先にユーザーを選んでください');
+    const r = await api('POST', '/api/items', {
+      userId: state.userId,
+      title: $('newItemTitle').value,
+      author: $('newItemAuthor').value || null,
+      volumes: $('newItemVolumes').value,
+    });
+    $('newItemTitle').value = ''; $('newItemAuthor').value = ''; $('newItemVolumes').value = '';
+    // 全部弾かれた時は黙って終わると「効いたのか分からない」ので、理由を出す
+    if (r.created.length === 0) throw new Error(`登録しませんでした: 既に台帳にある巻です (${r.skipped} 件)`);
+  });
   $('btnNewUser').onclick = () => dialogAction(async () => {
     await api('POST', '/api/users', { name: $('newUserName').value, defaultDir: $('newUserDir').value });
     $('newUserName').value = ''; $('newUserDir').value = '';

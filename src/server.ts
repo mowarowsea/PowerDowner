@@ -12,9 +12,9 @@ import type { Jd2Engine } from './engines/jd2.js';
 import type { BrowserEngine } from './engines/browser.js';
 import { bus, log } from './events.js';
 import type { Job, EngineStatus, LibraryItem } from './types.js';
-import { parseItem } from './volume.js';
+import { parseItem, seriesKeyOf } from './volume.js';
 import { isUsable, listContentFiles, scanFilenames } from './inventory.js';
-import { decideItem, type ItemInput } from './library.js';
+import { decideItem, diagnoseItems, type ItemInput } from './library.js';
 import type { CaptchaNotice } from './events.js';
 
 interface Deps {
@@ -199,12 +199,93 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     return id;
   };
 
-  app.get<{ Querystring: { series?: string; userId?: string } }>('/api/items', async (req) => ({
-    items: db.listItems({
+  /**
+   * 台帳の一覧。管理画面がこれ 1 本で描けるよう、行そのものに加えて
+   * 「その行が指しているジョブの今」と「放っておくと困る点」を添えて返す。
+   */
+  app.get<{ Querystring: { series?: string; userId?: string; limit?: string } }>('/api/items', async (req) => {
+    const limit = Number(req.query.limit);
+    const items = db.listItems({
       seriesKey: req.query.series,
       userId: req.query.userId === undefined ? undefined : requireUser(req.query.userId),
-    }),
-  }));
+      limit: Number.isInteger(limit) && limit > 0 ? Math.min(limit, 5000) : undefined,
+    });
+    return { items: diagnoseItems(items, (id) => db.getJob(id)) };
+  });
+
+  /**
+   * 台帳 1 行を直す。管理画面からの手直し専用。
+   *
+   * 作品名を変えたら **series_key も導き直す**。ここを揃えないと、名前だけ直って
+   * 別作品のままになり、直したつもりで何も変わらない。
+   */
+  app.patch<{ Params: { id: string }; Body: { title?: string; author?: string | null; volumes?: string } }>(
+    '/api/items/:id',
+    async (req) => {
+      const id = Number(req.params.id);
+      const cur = Number.isInteger(id) ? db.getItem(id) : null;
+      if (!cur) throw new HttpError(404, '台帳にありません');
+      const b = req.body ?? {};
+      const patch: { title?: string; author?: string | null; seriesKey?: string; volumeFrom?: number; volumeTo?: number } = {};
+
+      if (b.title !== undefined) {
+        const title = String(b.title).trim();
+        if (!title) throw new HttpError(400, '作品名は空にできません');
+        const key = seriesKeyOf(title);
+        if (!key) throw new HttpError(400, `作品名として使えません: ${title}`);
+        patch.title = title;
+        patch.seriesKey = key;
+      }
+      if (b.author !== undefined) patch.author = String(b.author ?? '').trim() || null;
+      if (b.volumes !== undefined) {
+        const raw = String(b.volumes).trim();
+        // 巻数だけを見る。読めないものを黙って通すと、重なり判定から静かに外れる
+        const parsed = parseItem({ volume: raw });
+        if (parsed.volumeFrom === null || parsed.volumeTo === null) {
+          throw new HttpError(400, `巻数として読めません: ${raw} (例: 3 または 1-7)`);
+        }
+        patch.volumeFrom = parsed.volumeFrom;
+        patch.volumeTo = parsed.volumeTo;
+      }
+      if (Object.keys(patch).length === 0) throw new HttpError(400, '直す項目がありません');
+
+      return { item: db.patchItem(id, patch) };
+    }
+  );
+
+  /**
+   * 同じキーの行をまとめて付け替える。
+   * 作品名の分からないまま投入されて、生の文字列からキーが作られた行を救うための口 —
+   * 1 行ずつ直すと、直した分から新しいキーへ移ってしまい、かえって散らばる。
+   */
+  app.post<{ Body: { userId?: number; seriesKey?: string; title?: string; author?: string | null } }>(
+    '/api/items/relabel',
+    async (req) => {
+      const b = req.body ?? {};
+      const userId = requireUser(b.userId);
+      const seriesKey = String(b.seriesKey ?? '');
+      if (!seriesKey) throw new HttpError(400, '直す対象がありません');
+      const title = String(b.title ?? '').trim();
+      if (!title) throw new HttpError(400, '作品名を入力してください');
+      const nextKey = seriesKeyOf(title);
+      if (!nextKey) throw new HttpError(400, `作品名として使えません: ${title}`);
+
+      const changed = db.relabelSeries(userId, seriesKey, {
+        seriesKey: nextKey,
+        title,
+        author: String(b.author ?? '').trim() || null,
+      });
+      if (changed === 0) throw new HttpError(404, '対象の行がありません');
+      return { changed, seriesKey: nextKey };
+    }
+  );
+
+  /** まとめて消す。1 作品ぶんを片付けるのに 1 行ずつ叩かせない */
+  app.post<{ Body: { ids?: number[] } }>('/api/items/delete', async (req) => {
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter((n) => Number.isInteger(n));
+    if (ids.length === 0) throw new HttpError(400, '消す行がありません');
+    return { deleted: db.deleteItems(ids) };
+  });
 
   app.post<{
     Body: {
