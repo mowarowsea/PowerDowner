@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="PowerDowner">
+  <title>PowerDowner</title>
+  <g fill="none" stroke="#c9820e" stroke-linecap="round">
+    <path d="M53.87 36.11A23 23 0 1 0 10.13 36.11" stroke-width="9.5"/>
+    <path d="M32 5.5V44" stroke-width="9"/>
+  </g>
+  <path d="M32 62.5L16 43H48Z" fill="#c9820e"/>
+</svg>

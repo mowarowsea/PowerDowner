@@ -1,0 +1,111 @@
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --text: #1c1f24;
+  --muted: #6b7280;
+  --border: #e3e6eb;
+  --accent: #a06a06;
+  --accent-text: #ffffff;
+  --ok: #16a34a;
+  --wait: #2563eb;
+  --bad: #dc2626;
+  --human: #7c3aed;
+  --bar: #e5e7eb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418;
+    --card: #1a1f26;
+    --text: #e6e8eb;
+    --muted: #9aa3af;
+    --border: #2a313b;
+    --accent: #e0a63c;
+    --accent-text: #1c1405;
+    --wait: #3b82f6;
+    --bar: #2a313b;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Noto Sans JP", sans-serif; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+button { font: inherit; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 6px 12px; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.ghost { background: transparent; }
+button.small { padding: 3px 8px; font-size: 12px; }
+button:disabled { opacity: .5; cursor: default; }
+input[type=text], input[type=password], textarea, select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+textarea { width: 100%; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+.spacer { flex: 1; }
+.row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.row input[type=text], .row input[type=password] { flex: 1; }
+.row.end { justify-content: flex-end; }
+.hint { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+.error { color: var(--bad); margin-top: 8px; white-space: pre-wrap; }
+
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand img { display: block; width: 26px; height: 26px; }
+.top { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 2; }
+.userpick { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.engines { display: flex; gap: 6px; }
+.pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.pill.on { border-color: var(--ok); color: var(--ok); }
+.pill.off { border-color: var(--bad); color: var(--bad); }
+
+.banner { margin: 12px 16px 0; padding: 10px 14px; border-radius: 8px; background: color-mix(in srgb, var(--human) 15%, var(--card)); border: 1px solid var(--human); }
+
+main { max-width: 1100px; margin: 0 auto; padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.listhead { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.listhead h2 { margin: 0; }
+.toggle { color: var(--muted); font-size: 12px; display: flex; gap: 4px; align-items: center; }
+.empty { color: var(--muted); padding: 16px; text-align: center; }
+
+.jobs { display: flex; flex-direction: column; gap: 6px; }
+.job { display: grid; grid-template-columns: 96px 20px 1fr 120px 150px; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.job .fav { width: 20px; height: 20px; object-fit: contain; border-radius: 4px; display: block; }
+.job .name { min-width: 0; }
+.job .name .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.job .name .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job .name .sub .host { color: var(--text); font-weight: 600; }
+.job .name .sub .eng { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); font-size: 11px; line-height: 16px; vertical-align: 1px; }
+.job .name .sub .eng[hidden] { display: none; }
+.job .name .sub .eng.e-aria2 { border-color: var(--accent); color: var(--accent); }
+.job .name .sub .eng.e-jd2 { border-color: var(--ok); color: var(--ok); }
+.job .name .sub .eng.e-browser { border-color: var(--human); color: var(--human); }
+.job .name .sub .rest:not(:empty)::before { content: " · "; }
+.job .name .err { color: var(--bad); font-size: 12px; white-space: pre-wrap; }
+.job .name .human { color: var(--human); font-size: 12px; }
+.bar { height: 6px; background: var(--bar); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+.job.done .bar > i { background: var(--ok); }
+.job.failed .bar > i { background: var(--bad); }
+.job.waiting_human .bar > i { background: var(--human); }
+.stat { font-size: 12px; color: var(--muted); text-align: right; white-space: nowrap; }
+.badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; display: inline-block; text-align: center; border: 1px solid var(--border); color: var(--muted); }
+.badge.downloading { border-color: var(--accent); color: var(--accent); }
+.badge.done { border-color: var(--ok); color: var(--ok); }
+.badge.failed { border-color: var(--bad); color: var(--bad); }
+.badge.waiting_human { border-color: var(--human); color: var(--human); }
+.badge.resolving { border-color: var(--accent); color: var(--accent); }
+.badge.waiting_site { border-color: var(--wait); color: var(--wait); }
+.job.waiting_site .bar > i { background: var(--wait); }
+.actions { display: flex; gap: 4px; justify-content: flex-end; }
+@media (max-width: 720px) {
+  .job { grid-template-columns: 80px 20px 1fr; }
+  .stat, .actions { grid-column: 1 / -1; text-align: left; justify-content: flex-start; }
+}
+
+dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--text); padding: 0; width: min(720px, 94vw); }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+.dialog { padding: 16px 18px; }
+.dialog h2 { margin-top: 12px; }
+.dialog h2:first-child { margin-top: 0; }
+table.users { width: 100%; border-collapse: collapse; }
+table.users th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px; }
+table.users td { padding: 4px; }
+table.users input { width: 100%; }
+table.users td:last-child { width: 130px; white-space: nowrap; }
+
+.log { max-width: 1100px; margin: 0 auto; padding: 0 16px 24px; }
+.log pre { margin: 0; font-size: 11px; color: var(--muted); max-height: 140px; overflow: auto; white-space: pre-wrap; }

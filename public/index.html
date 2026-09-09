@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PowerDowner</title>
+  <link rel="icon" href="/favicon.ico" sizes="32x32">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="theme-color" content="#c9820e">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="/favicon.svg" alt="" width="26" height="26"><h1>PowerDowner</h1></div>
+    <div class="engines" id="engines"></div>
+    <div class="spacer"></div>
+    <label class="userpick">
+      <span>ユーザー</span>
+      <select id="userSelect"></select>
+    </label>
+    <button id="btnUsers" class="ghost">ユーザー / 設定</button>
+  </header>
+
+  <div id="captchaBanner" class="banner" hidden></div>
+
+  <main>
+    <section class="card add">
+      <textarea id="urls" rows="3" placeholder="URL を貼り付け (複数行 OK)&#10;例: https://civitai.com/models/12345  /  https://rapidgator.net/file/..."></textarea>
+      <div class="row">
+        <input id="destDir" type="text" placeholder="保存先を上書き (空欄ならユーザーの既定フォルダ)">
+        <button id="btnAdd" class="primary">追加</button>
+      </div>
+      <div id="addError" class="error" hidden></div>
+    </section>
+
+    <section class="card">
+      <div class="listhead">
+        <h2>ジョブ</h2>
+        <label class="toggle"><input type="checkbox" id="showAll"> 全ユーザー表示</label>
+        <div class="spacer"></div>
+        <button id="btnClearDone" class="ghost small">完了分を一覧から消す</button>
+      </div>
+      <div id="jobs" class="jobs"></div>
+      <div id="jobsEmpty" class="empty" hidden>まだジョブがありません。上の欄に URL を貼って「追加」してください。</div>
+    </section>
+  </main>
+
+  <dialog id="usersDialog">
+    <form method="dialog" class="dialog">
+      <h2>ユーザー</h2>
+      <p class="hint">ユーザーはデータの切り分け用です。パスワードはありません。既定フォルダは絶対パスで指定してください。</p>
+      <table class="users">
+        <thead><tr><th>名前</th><th>既定フォルダ</th><th></th></tr></thead>
+        <tbody id="usersBody"></tbody>
+        <tfoot>
+          <tr>
+            <td><input id="newUserName" type="text" placeholder="新しいユーザー名"></td>
+            <td><input id="newUserDir" type="text" placeholder="D:\Downloads\name"></td>
+            <td><button type="button" id="btnNewUser" class="primary small">追加</button></td>
+          </tr>
+        </tfoot>
+      </table>
+
+      <h2>CivitAI</h2>
+      <p class="hint">ログイン必須モデルを落とすには API キーが必要です。CivitAI のアカウント設定で発行できます。全ユーザー共通です。</p>
+      <div class="row">
+        <input id="civitaiToken" type="password" placeholder="API キー (空欄で削除)">
+        <span id="civitaiTokenState" class="hint"></span>
+        <button type="button" id="btnSaveToken" class="primary small">保存</button>
+      </div>
+
+      <div id="dialogError" class="error" hidden></div>
+      <div class="row end">
+        <button value="close" class="ghost">閉じる</button>
+      </div>
+    </form>
+  </dialog>
+
+  <footer class="log"><pre id="log"></pre></footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

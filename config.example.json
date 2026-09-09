@@ -1,0 +1,86 @@
+{
+  "port": 3939,
+  "host": "0.0.0.0",
+  "dataDir": "data",
+  "apiToken": "change-me-dryeyes-token",
+  "aria2": {
+    "exe": "tools/aria2/aria2c.exe",
+    "rpcPort": 6800,
+    "secret": "change-me",
+    "maxConcurrent": 3,
+    "splits": 8
+  },
+  "jd2": {
+    "apiUrl": "http://127.0.0.1:3128",
+    "autoStart": true,
+    "headless": true,
+    "dir": "tools/jd2",
+    "javaExe": "tools/jre/bin/java.exe",
+    "startTimeoutSec": 240,
+    "stopOnExit": true,
+    "hosts": [
+      "katfile.com",
+      "katfile.biz",
+      "dailyuploads.net",
+      "frdl.to",
+      "frdl.io",
+      "frdl.my",
+      "frdl.hk",
+      "rapidgator.net",
+      "rg.to",
+      "turbobit.net",
+      "turb.cc",
+      "turb.to",
+      "uploady.io",
+      "wupfile.com",
+      "mexa.sh",
+      "mexashare.com"
+    ]
+  },
+  "library": {
+    "scanDirs": [],
+    "scanRecursive": false
+  },
+  "mirrors": {
+    "hostLimitWaitSec": 60,
+    "priority": [
+      "dailyuploads.net",
+      "mexa.sh",
+      "mexashare.com",
+      "rapidgator.net",
+      "rg.to",
+      "wupfile.com",
+      "uploady.io",
+      "turbobit.net",
+      "turb.cc",
+      "turb.to",
+      "frdl.to",
+      "frdl.io",
+      "frdl.my",
+      "frdl.hk",
+      "katfile.com",
+      "katfile.biz"
+    ]
+  },
+  "browser": {
+    "executablePath": "",
+    "profileDir": "data/browser-profile",
+    "hosts": [
+      "katfile.biz",
+      "katfile.com",
+      "uploady.io",
+      "frdl.to",
+      "frdl.io",
+      "frdl.my",
+      "frdl.hk",
+      "turbobit.net",
+      "turb.cc",
+      "turb.to"
+    ],
+    "timeoutMinutes": 20,
+    "maxConcurrent": 3,
+    "keepAwakeHosts": [
+      "uploady.io"
+    ]
+  }
+}
