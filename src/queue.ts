@@ -8,8 +8,10 @@ import type { Jd2Engine } from './engines/jd2.js';
 import type { BrowserEngine } from './engines/browser.js';
 import type { Router } from './router.js';
 import type { Job, ResolvedDownload, User, MergeRecord } from './types.js';
-import { decideItem, type ItemInput } from './library.js';
+import { decideItems, type ItemInput } from './library.js';
+import { fitPath, planName, uniqueName, type NameInput } from './naming.js';
 import { hostOf, pickFreeHostMirror, sortByPriority } from './mirrors.js';
+import { hosterKeyOf, newHosterFor, priorityDomains, splitByEnabled } from './hosters.js';
 import { bus, log } from './events.js';
 import { toast } from './notify.js';
 
@@ -44,6 +46,20 @@ export interface AddInput {
   destDir?: string | null;
 }
 
+/** 「使用しない」設定のせいでジョブにしなかった URL */
+export interface RejectedUrl {
+  url: string;
+  /** 画面に出す業者名 */
+  hoster: string;
+}
+
+export interface AddResult {
+  jobs: Job[];
+  /** 空行・重複・http(s) 以外 */
+  skipped: string[];
+  rejected: RejectedUrl[];
+}
+
 /** DryEyes からの投入。1 件が 1 ファイルで、urls はその同一ファイルのミラー */
 export interface AddItemsInput {
   userId: number;
@@ -58,6 +74,12 @@ export interface AddItemsResult {
   merged: { jobId: string; sourceKey: string | null; title: string | null; urls: string[] }[];
   skipped: { sourceKey: string | null; title: string | null; reason: string }[];
   invalid: { sourceKey: string | null; title: string | null; reason: string }[];
+  /**
+   * 候補が「使用しない」アップローダばかりだったので登録しなかったもの。
+   * skipped (もう持っている) と分けているのは、こちらは設定を戻せば落ちてくる —
+   * 投入元に「取得済み」と誤解させると、二度と入ってこなくなる。
+   */
+  rejected: { sourceKey: string | null; title: string | null; reason: string; hosters: string[] }[];
   /** 上限で切り捨てた件数 */
   truncated: number;
 }
@@ -80,6 +102,50 @@ export class Queue {
     private browser: BrowserEngine,
     private router: Router,
   ) {}
+
+  // ---- アップローダの台帳 -------------------------------------------------
+
+  /**
+   * ミラーの並べ替えに使うドメインの列。
+   * config.json ではなく DB の台帳が正 — 画面で並べ替えたものがすぐ効く。
+   */
+  private priorityDomains(): string[] {
+    return priorityDomains(this.db.listHosters());
+  }
+
+  /** この URL がどの業者か。台帳に無ければ null (直リンクや CivitAI はここに来る) */
+  private hosterKeyFor(url: string): string | null {
+    return hosterKeyOf(url, this.db.listHosters());
+  }
+
+  /**
+   * 実績を 1 つ記録する。
+   *
+   * 数える相手は必ず meta.hosterKey — job.url は途中で直リンク配信の CDN に化けるので
+   * (frdl なら e21.urleecher.com)、url から引き直すと別のところに実績が付く。
+   */
+  private bump(job: Job, kind: 'ok' | 'fail' | 'human'): void {
+    const key = typeof job.meta.hosterKey === 'string' ? job.meta.hosterKey : null;
+    if (key) this.db.bumpHoster(key, kind);
+  }
+
+  /**
+   * 台帳に無いドメインを行として起こす。
+   *
+   * 呼ぶのはワンクリックホスター経路 (JD2 / ブラウザ) に入った時だけ。投入のたびに
+   * 起こすと、直リンクや CivitAI まで「アップローダ」として表に並んでしまう。
+   * 既定は「使用する」なので、業者が新しいドメインに移っても止まらない。
+   */
+  private learnHoster(job: Job): string | null {
+    const known = this.hosterKeyFor(job.url);
+    if (known) return known;
+    const def = newHosterFor(job.url);
+    // 起こせないほど壊れた URL なら、投入時に決めた付け先をそのまま使う
+    if (!def) return typeof job.meta.hosterKey === 'string' ? job.meta.hosterKey : null;
+    const row = this.db.ensureHoster(def);
+    log(`[hosters] 新しいアップローダを台帳に追加しました: ${row.label} (使用する / 優先度は最後)`);
+    return row.key;
+  }
 
   // ---- エンジンからのコールバック -----------------------------------------
 
@@ -107,9 +173,11 @@ export class Queue {
       return;
     }
 
+    const finalName = verdict.path ? this.relocate(cur, verdict.path) : name;
+
     const job = this.db.patchJob(jobId, {
       status: 'done',
-      filename: name,
+      filename: finalName,
       // 実ファイルの大きさが分かったならそれを正とする。エンジンによっては
       // 進捗を 1 度も報告しないまま終わるので、0 B のまま完了になってしまう
       bytesTotal: verdict.size > 0 ? verdict.size : cur.bytesTotal,
@@ -119,9 +187,12 @@ export class Queue {
       error: null,
       meta: { detail: '', humanDetail: '' },
     });
-    // 台帳を確定させる。ここを落とすと、次に別サイトから同じ巻が来た時に弾けない
-    const entry = this.db.findItemByJob(jobId);
-    if (entry && entry.status === 'pending') this.db.patchItem(entry.id, { status: 'done' });
+    // 実ファイルを確認した後にだけ数える。エンジンの「終わった」で数えると、
+    // 0 バイトや HTML を掴まされたアップローダが優良に見えてしまう
+    this.bump(cur, 'ok');
+
+    // ジョブが done になった時点で「取得済み」の判定に参加する (src/library.ts)。
+    // 棚 (pinax) に載るのは次のスキャンからなので、それまではこのジョブが弾く
     log(`[queue] 完了: ${job?.filename ?? cur.url} (${verdict.size} B)`);
     this.emit(job);
   };
@@ -138,12 +209,12 @@ export class Queue {
    * 別名で置くことがあり、見つけられないだけの完走を失敗にするほうが害が大きい。
    * その場合はエンジンの報告値で見て、1 バイトも受け取っていない時だけ弾く。
    */
-  private verifyDownload(job: Job, filename: string | null): { ok: true; size: number } | { ok: false; reason: string } {
+  private verifyDownload(job: Job, filename: string | null): { ok: true; size: number; path: string | null } | { ok: false; reason: string } {
     const found = filename ? this.findDownloaded(job.destDir, filename) : null;
 
     if (found === null) {
       const reported = Math.max(job.bytesDone, job.bytesTotal);
-      if (reported > 0) return { ok: true, size: 0 };
+      if (reported > 0) return { ok: true, size: 0, path: null };
       return { ok: false, reason: '完了と言われましたが、ファイルが見つからず 1 バイトも受け取っていません' };
     }
 
@@ -160,7 +231,7 @@ export class Queue {
     if (looksLikeHtml(found)) {
       return { ok: false, reason: `ファイルではなく Web ページが保存されました (${size} B。リンクの期限切れやエラーページの可能性)` };
     }
-    return { ok: true, size };
+    return { ok: true, size, path: found };
   }
 
   /** 保存先から実ファイルを探す。JD2 はパッケージ名のフォルダを 1 段掘ることがある */
@@ -175,6 +246,58 @@ export class Queue {
       }
     } catch { /* 保存先を読めないなら、見つからなかったのと同じ扱いでよい */ }
     return null;
+  }
+
+  /**
+   * 落ちてきたファイルを `[著者] 作品名/[著者] 作品名 第nn巻.拡張子` へ移す。
+   * 返すのは新しいファイル名 (画面と台帳に出す名前)。
+   *
+   * 作品名・巻数は台帳の行を正とし、無ければ投入メタ、それも無ければ元のファイル名から読む。
+   * 読めなければ名前は変えない (`src/naming.ts`)。
+   *
+   * **失敗しても完了は完了。** ファイルはもう手元にあるので、名前が揃わないことより
+   * 「落ちているのに失敗と言われる」ほうが困る。NAS の権限やパス長でここは普通に転ぶ。
+   */
+  private relocate(job: Job, filePath: string): string {
+    const current = path.basename(filePath);
+    if (!this.cfg.rename.enabled) return current;
+
+    // 作品名と巻数は**投入時に読んだ解釈** (ジョブに焼いてある) を正とする。
+    // 落ちてきたファイル名から読み直すと、URL 由来のゴミが作品名に混ざる
+    const meta = (job.meta.item ?? {}) as { title?: string | null; author?: string | null };
+    const input: NameInput = {
+      author: meta.author ?? null,
+      title: meta.title ?? null,
+      volumeFrom: job.volumeFrom,
+      volumeTo: job.volumeTo,
+    };
+
+    const plan = fitPath(job.destDir, planName(current, input, { folder: this.cfg.rename.folder }), input);
+    const targetDir = plan.folder ? path.join(job.destDir, plan.folder) : job.destDir;
+
+    try {
+      // 既に正しい場所と名前なら何もしない。ここで uniqueName に渡すと
+      // 自分自身とぶつかって ` (2)` が付いてしまう
+      if (path.resolve(path.join(targetDir, plan.file)) === path.resolve(filePath)) return current;
+
+      fs.mkdirSync(targetDir, { recursive: true });
+      const finalName = uniqueName(targetDir, plan.file, (p) => fs.existsSync(p));
+      fs.renameSync(filePath, path.join(targetDir, finalName));
+      this.pruneEmptyDir(path.dirname(filePath), job.destDir);
+      log(`[queue] 整理: ${current} -> ${path.join(plan.folder ?? '', finalName)}`);
+      return finalName;
+    } catch (e) {
+      log(`[queue] 整理できませんでした (落ちた名前のまま置きます): ${current} (${(e as Error).message})`);
+      return current;
+    }
+  }
+
+  /** JD2 が掘ったパッケージフォルダなど、空になった 1 段を片付ける。保存先そのものは消さない */
+  private pruneEmptyDir(dir: string, destDir: string): void {
+    if (path.resolve(dir) === path.resolve(destDir)) return;
+    try {
+      if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+    } catch { /* 消せないなら残しておけばよい。中身があるなら消してはいけない */ }
   }
 
   onFailed = (jobId: string, error: string): void => {
@@ -193,6 +316,11 @@ export class Queue {
       this.emit(job);
       return;
     }
+
+    // ここから先はこの候補を見限る。ミラーへ移ろうが失敗が確定しようが、
+    // 「このアップローダでは落ちなかった」ことに変わりはないので 1 回だけ数える。
+    // 台帳スキップ (もう持っている) はジョブにならないので、ここには来ない
+    this.bump(cur, 'fail');
 
     // 未試行の候補が残っていれば、失敗を確定させずに次のミラーへ回す。
     // ブラウザの人間待ちタイムアウトもここを通るので、詰まったまま放置されることがない
@@ -233,6 +361,8 @@ export class Queue {
       meta: {
         mirrors: rest,
         tried: [...tried, { url: cur.url, error }],
+        // 別のアップローダへ移るので、実績の付け先と人間待ちの計上も引き継がない
+        hosterKey: this.hosterKeyFor(next), humanCounted: false,
         // 経路の記憶も落とす。前の候補でブラウザに回っていても、次は経路判定からやり直す
         route: '', via: '', browserDirect: false, detail: '', humanDetail: '',
       },
@@ -256,7 +386,7 @@ export class Queue {
     if (!cur || cur.status !== 'downloading') return;
 
     const mirrors = Array.isArray(cur.meta.mirrors) ? (cur.meta.mirrors as string[]) : [];
-    const next = pickFreeHostMirror(mirrors, this.busyHosts(cur.id), this.cfg.mirrors.priority);
+    const next = pickFreeHostMirror(mirrors, this.busyHosts(cur.id), this.priorityDomains());
     if (!next) {
       // 移せる先が無い。失敗にはしない — 上限は時間で空くので、待っていれば進む
       this.emit(this.db.patchJob(jobId, {
@@ -277,6 +407,7 @@ export class Queue {
       filename: null, bytesTotal: 0, bytesDone: 0,
       meta: {
         mirrors: rest,
+        hosterKey: this.hosterKeyFor(next), humanCounted: false,
         route: '', via: '', browserDirect: false, detail: '', humanDetail: '',
       },
     });
@@ -316,7 +447,14 @@ export class Queue {
     if (!cur) return;
     if (waiting && (cur.status === 'downloading' || cur.status === 'waiting_human')) {
       if (cur.status !== 'waiting_human' || cur.meta.humanDetail !== detail) {
-        this.emit(this.db.patchJob(jobId, { status: 'waiting_human', meta: { humanDetail: detail } }));
+        // 人間待ちは 1 秒ごとに報告されるので、ジョブにつき 1 回だけ数える。
+        // 数えたい実績は「何回呼び出されたか」ではなく「何件が人手を要したか」
+        const first = cur.meta.humanCounted !== true;
+        if (first) this.bump(cur, 'human');
+        this.emit(this.db.patchJob(jobId, {
+          status: 'waiting_human',
+          meta: first ? { humanDetail: detail, humanCounted: true } : { humanDetail: detail },
+        }));
       }
       // headless 運用では人間待ちはほぼブラウザ経路にしか出ない。ここで通知しないと
       // 「放っておいたら終わっている」前提が崩れて、黙って止まったジョブに気づけなくなる。
@@ -390,8 +528,16 @@ export class Queue {
     return { user, dest };
   }
 
-  private newJob(userId: number, url: string, dest: string, meta: Record<string, unknown>): Job {
+  private newJob(
+    userId: number,
+    url: string,
+    dest: string,
+    meta: Record<string, unknown>,
+    parsed: { seriesKey: string; volumeFrom: number | null; volumeTo: number | null } | null = null
+  ): Job {
     const ts = now();
+    // 実績の付け先はここで決めて動かさない。url は直リンクに差し替わることがある
+    meta = { ...meta, hosterKey: this.hosterKeyFor(url) };
     return {
       id: randomUUID().slice(0, 8),
       userId,
@@ -405,39 +551,57 @@ export class Queue {
       speed: 0,
       error: null,
       externalId: null,
+      // 「同じ巻が別サイトから来た」「落としたばかりでまだ棚に無い」を判定するための解釈。
+      // 巻数を読めなかったものは null のままで、判定に参加しない
+      seriesKey: parsed?.seriesKey || null,
+      volumeFrom: parsed?.volumeFrom ?? null,
+      volumeTo: parsed?.volumeTo ?? null,
       meta,
       createdAt: ts,
       updatedAt: ts,
     };
   }
 
-  add(input: AddInput): { jobs: Job[]; skipped: string[] } {
+  add(input: AddInput): AddResult {
     const { user, dest } = this.resolveDest(input.userId, input.destDir);
 
     const seen = new Set<string>();
     const jobs: Job[] = [];
     const skipped: string[] = [];
+    const rejected: RejectedUrl[] = [];
+    const hosters = this.db.listHosters();
     for (const raw of input.urls) {
       const url = raw.trim();
       if (!url) continue;
       if (seen.has(url)) { skipped.push(url); continue; }
       seen.add(url);
       if (!/^https?:\/\//i.test(url)) { skipped.push(url); continue; }
+
+      // 「使用しない」アップローダはジョブにしない。人間が手で貼った時も同じ扱いにする —
+      // 例外を作ると、無操作で回すという設定の意味が薄れる (設定画面で戻せる)
+      const [bad] = splitByEnabled([url], hosters).rejected;
+      if (bad) {
+        rejected.push({ url, hoster: bad.hoster });
+        bus.emit('rejected', { hosters: [bad.hoster], label: url, source: 'ui' });
+        log(`[queue] 使用しない設定なので登録しません: ${url} (${bad.hoster})`);
+        continue;
+      }
+
       const job = this.newJob(user.id, url, dest, {});
       this.db.insertJob(job);
       jobs.push(job);
       this.emit(job);
     }
     this.schedulePump();
-    return { jobs, skipped };
+    return { jobs, skipped, rejected };
   }
 
   /**
    * DryEyes からの投入。1 件 = 1 ファイルで、urls はその同一ファイルのミラー。
-   * 台帳と突き合わせて、取得済みならスキップ、未完のジョブがあれば合流させる
-   * (docs/ROADMAP.md 2 章)。
+   * 棚 (pinax) に聞いて取得済みならスキップ、落とし中のジョブがあれば合流させる
+   * (docs/ROADMAP.md 2.5)。
    */
-  addItems(input: AddItemsInput): AddItemsResult {
+  async addItems(input: AddItemsInput): Promise<AddItemsResult> {
     const { user, dest } = this.resolveDest(input.userId, input.destDir);
 
     const all = Array.isArray(input.items) ? input.items : [];
@@ -447,9 +611,15 @@ export class Queue {
       log(`[queue] 投入が上限 ${MAX_ITEMS_PER_REQUEST} 件を超えたので ${truncated} 件を切り捨てました`);
     }
 
-    const result: AddItemsResult = { created: [], merged: [], skipped: [], invalid: [], truncated };
+    const result: AddItemsResult = { created: [], merged: [], skipped: [], invalid: [], rejected: [], truncated };
+    const hosters = this.db.listHosters();
 
-    for (const item of items) {
+    // 所持の判定はまとめて 1 回で聞く。20 件の投入で棚を 20 回叩く理由が無い。
+    // URL が無効な件も混ざるが、聞く相手が増えるわけではないので選り分けない
+    const decisions = await decideItems(this.db, this.cfg.pinax, user.id, items);
+
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
       const meta = item.meta ?? {};
       const label = (meta.title ?? meta.rawText ?? null) as string | null;
       const sourceKey = item.sourceKey ?? null;
@@ -467,7 +637,7 @@ export class Queue {
         continue;
       }
 
-      const decision = decideItem(this.db, user.id, item);
+      const decision = decisions[index];
 
       // 黙って捨てると「新刊が出たのに落ちてこない」の切り分けができなくなるので必ず残す
       if (decision.kind === 'skip') {
@@ -476,45 +646,50 @@ export class Queue {
         continue;
       }
 
+      // 「使用しない」アップローダの候補を落とす。一部だけ無効なら残りで回す —
+      // ここで item ごと捨てると、katfile を切った途端に katfile も載っている巻が
+      // まるごと落ちてこなくなる
+      const { usable, rejected } = splitByEnabled(urls, hosters);
+      if (usable.length === 0) {
+        const names = [...new Set(rejected.map((r) => r.hoster))];
+        const reason = `使用しない設定のアップローダだけでした (${names.join(', ')})`;
+        result.rejected.push({ sourceKey, title: label, reason, hosters: names });
+        bus.emit('rejected', { hosters: names, label, source: 'items' });
+        log(`[queue] 登録しません: ${label ?? urls[0]} (${reason})`);
+        continue;
+      }
+
       // 合流先が消えていた場合は new として落とす
-      if (decision.kind === 'merge' && this.mergeIntoJob(decision.jobId, decision.item.id, urls, item.source ?? null)) {
-        result.merged.push({ jobId: decision.jobId, sourceKey, title: label, urls });
+      if (decision.kind === 'merge' && this.mergeIntoJob(decision.jobId, usable, item.source ?? null)) {
+        result.merged.push({ jobId: decision.jobId, sourceKey, title: label, urls: usable });
         continue;
       }
 
       // 落としやすいところから試す。並べ替えるのはここ 1 か所だけで、
       // 以降は meta.mirrors の順に消化していく
-      const ordered = sortByPriority(urls, this.cfg.mirrors.priority);
-      const job = this.newJob(user.id, ordered[0], dest, {
-        item: {
-          title: meta.title ?? null,
-          author: meta.author ?? null,
-          volume: meta.volume ?? null,
-          rawText: meta.rawText ?? null,
+      const ordered = sortByPriority(usable, this.priorityDomains());
+      const job = this.newJob(
+        user.id,
+        ordered[0],
+        dest,
+        {
+          item: {
+            title: meta.title ?? null,
+            author: meta.author ?? null,
+            volume: meta.volume ?? null,
+            rawText: meta.rawText ?? null,
+          },
+          source: item.source ?? null,
+          sourceKey,
+          mirrors: ordered.slice(1),
+          tried: [],
         },
-        source: item.source ?? null,
-        sourceKey,
-        mirrors: ordered.slice(1),
-        tried: [],
-      });
+        decision.parsed
+      );
       this.db.insertJob(job);
 
-      const entry = this.db.insertItem({
-        userId: user.id,
-        seriesKey: decision.parsed.seriesKey,
-        volumeFrom: decision.parsed.volumeFrom,
-        volumeTo: decision.parsed.volumeTo,
-        status: 'pending',
-        title: (meta.title ?? null) as string | null,
-        author: (meta.author ?? null) as string | null,
-        jobId: job.id,
-        source: item.source ?? null,
-        rawText: (meta.rawText ?? null) as string | null,
-      });
-      const stored = this.db.patchJob(job.id, { meta: { itemId: entry.id } }) ?? job;
-
-      result.created.push(stored);
-      this.emit(stored);
+      result.created.push(job);
+      this.emit(job);
     }
 
     this.schedulePump();
@@ -527,7 +702,7 @@ export class Queue {
    * サイト A で詰まっていた巻がサイト B の出現で落ちるのはこの経路。
    * 合流先のジョブが消えていたら false を返し、呼び出し側で新規として落とす。
    */
-  private mergeIntoJob(jobId: string, itemId: number, urls: string[], source: string | null): boolean {
+  private mergeIntoJob(jobId: string, urls: string[], source: string | null): boolean {
     const job = this.db.getJob(jobId);
     if (!job) return false;
 
@@ -536,15 +711,20 @@ export class Queue {
     const known = new Set<string>([job.url, ...mirrors, ...tried.map((t) => t.url)]);
     const added = urls.filter((u) => !known.has(u));
 
-    this.db.appendMerge(itemId, { source, urls, at: now() } as MergeRecord);
+    // どこから同じ巻が来たかの記録。台帳が無くなったので、残す場所はジョブ自身
+    const mergedFrom: MergeRecord[] = [
+      ...(Array.isArray(job.meta.mergedFrom) ? (job.meta.mergedFrom as MergeRecord[]) : []),
+      { source, urls, at: now() },
+    ];
 
     if (added.length === 0) {
+      this.db.patchJob(jobId, { meta: { mergedFrom } });
       log(`[queue] 合流 (新しい候補は無し): ${job.url}`);
       return true;
     }
 
     // 合流で増えた候補も含めて並べ直す。今試している url はそのまま (途中で乗り換えない)
-    const nextMirrors = sortByPriority([...mirrors, ...added], this.cfg.mirrors.priority);
+    const nextMirrors = sortByPriority([...mirrors, ...added], this.priorityDomains());
     const revive = job.status === 'failed' || job.status === 'canceled';
     const next = revive
       ? this.db.patchJob(jobId, {
@@ -555,15 +735,18 @@ export class Queue {
           externalId: null,
           engine: null,
           meta: {
+            mergedFrom,
             mirrors: nextMirrors.slice(1),
             tried: [...tried, { url: job.url, error: job.error ?? '' }],
+            hosterKey: this.hosterKeyFor(nextMirrors[0]),
+            humanCounted: false,
             detail: '',
             humanDetail: '',
             via: '',
             route: '',
           },
         })
-      : this.db.patchJob(jobId, { meta: { mirrors: nextMirrors } });
+      : this.db.patchJob(jobId, { meta: { mergedFrom, mirrors: nextMirrors } });
 
     log(`[queue] 合流: ${job.url} に候補 ${added.length} 件を追加${revive ? ' (失敗していたので再開)' : ''}`);
     this.emit(next);
@@ -571,16 +754,45 @@ export class Queue {
     return true;
   }
 
+  /**
+   * ジョブを最初からやり直す。
+   *
+   * 見限った候補 (meta.tried) も含めて全部の URL を集め直し、優先度順に並べ直してから
+   * 先頭を今の候補にする — 「この 1 サイトをもう一度」ではなく「このジョブの候補を
+   * 全部まっさらにして最初から」。時間を置けば直っている失敗 (サイト側の 5xx、
+   * 一時的な人間待ち、同時ダウンロード数の上限) が多く、1 件目から試し直すほうが
+   * 落ちる見込みが高い。台帳の実績は失敗した時点で数え済みなので、ここでは数えない。
+   */
   retry(id: string): Job {
     const job = this.db.getJob(id);
     if (!job) throw new HttpError(404, 'ジョブがありません');
     if (job.status !== 'failed' && job.status !== 'canceled') throw new HttpError(400, '失敗または中止したジョブのみ再試行できます');
+
+    const mirrors = Array.isArray(job.meta.mirrors) ? (job.meta.mirrors as string[]) : [];
+    const tried = Array.isArray(job.meta.tried) ? (job.meta.tried as { url?: string }[]) : [];
+    // 並びは tried → 今の url → mirrors。ミラー切替で消化した順そのままなので、
+    // 優先度が同じものは元の順番を保ったまま並べ直せる
+    const all: string[] = [];
+    for (const u of [...tried.map((t) => String(t?.url ?? '')), job.url, ...mirrors]) {
+      if (u && !all.includes(u)) all.push(u);
+    }
+    const ordered = sortByPriority(all, this.priorityDomains());
+    const first = ordered[0] ?? job.url;
+
     const next = this.db.patchJob(id, {
-      status: 'queued', error: null, speed: 0, bytesDone: 0, externalId: null, engine: null,
-      // route も消す。一度ブラウザへ回ったジョブが config を変えても
-      // ブラウザに固定され続けるので、再試行では経路判定からやり直す
-      meta: { detail: '', humanDetail: '', via: '', route: '' },
+      status: 'queued', url: first, error: null, speed: 0, externalId: null, engine: null,
+      // 別の候補から取り直すかもしれないので、前回の進捗と名前は捨てる
+      filename: null, bytesTotal: 0, bytesDone: 0,
+      meta: {
+        mirrors: ordered.slice(1),
+        tried: [],
+        hosterKey: this.hosterKeyFor(first), humanCounted: false,
+        // route も消す。一度ブラウザへ回ったジョブが config を変えても
+        // ブラウザに固定され続けるので、再試行では経路判定からやり直す
+        detail: '', humanDetail: '', via: '', route: '', browserDirect: false,
+      },
     });
+    log(`[queue] 再試行 (候補 ${ordered.length} 件を最初から): ${first}`);
     this.emit(next);
     this.schedulePump();
     return next!;
@@ -614,7 +826,8 @@ export class Queue {
     if (job.status === 'downloading' || job.status === 'waiting_human' || job.status === 'waiting_site' || job.status === 'resolving') {
       await this.detach(job);
     }
-    this.db.deletePendingItemsByJob(id);
+    // ジョブを消せばその巻は判定から外れる = また落とせる。
+    // 台帳の頃に要った「完走していない行を道連れに消す」後始末はもう無い
     this.db.deleteJob(id);
     bus.emit('jobRemoved', id);
   }
@@ -664,12 +877,19 @@ export class Queue {
         }));
       } else if (route.engine === 'jd2') {
         if (!this.jd2.available) throw new Error(`JD2 が利用できません: ${this.jd2.detail}`);
+        // ワンクリックホスター経路に入った = アップローダだと分かった。まだ台帳に無ければ起こす
         const ext = await this.jd2.add({ ...job, engine: 'jd2' });
-        this.emit(this.db.patchJob(job.id, { status: 'downloading', engine: 'jd2', externalId: ext }));
+        this.emit(this.db.patchJob(job.id, {
+          status: 'downloading', engine: 'jd2', externalId: ext,
+          meta: { hosterKey: this.learnHoster(job) },
+        }));
       } else {
         if (!this.browser.available) throw new Error(`ブラウザが利用できません: ${this.browser.detail}`);
         // 自動操作が走る間は downloading。人間が必要になった時だけエンジン側が waiting_human に切り替える
-        const next = this.db.patchJob(job.id, { status: 'downloading', engine: 'browser', meta: { route: 'browser' } })!;
+        const next = this.db.patchJob(job.id, {
+          status: 'downloading', engine: 'browser',
+          meta: { route: 'browser', hosterKey: this.learnHoster(job) },
+        })!;
         this.emit(next);
         await this.browser.add(next);
       }

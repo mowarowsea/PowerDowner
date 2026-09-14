@@ -23,6 +23,10 @@ export interface DriverContext {
   askHuman(message: string): void;
   humanDone(): void;
   downloadDetected(): boolean;
+  /** このジョブのページが今までに開いたポップアップの数 (広告に吸われたクリックの判定用) */
+  popupCount(): number;
+  /** 操作対象のページを前面に戻す。ポップアップに奪われたフォーカスを取り返す */
+  focus(): void;
   log(msg: string): void;
 }
 
@@ -49,6 +53,15 @@ export interface Snapshot {
   hcaptchaToken: string;
   imageCaptcha: boolean;
   codeValue: string;
+  /**
+   * 人間判定のウィジェットが**今見えているか**。DOM にあるだけでは人間を呼ばない。
+   * frdl は最初のページから hCaptcha を DOM に置いたまま隠していて、
+   * 「押すものが画面に無いのに押してくださいと出る」ことになる。
+   */
+  turnstileVisible: boolean;
+  recaptchaVisible: boolean;
+  hcaptchaVisible: boolean;
+  imageCaptchaVisible: boolean;
   anchors: { href: string; text: string }[];
   bodyText: string;
   /** 「無料ダウンロード」に相当する要素を見つけて data-pd-free で印を付けたか */
@@ -56,9 +69,42 @@ export interface Snapshot {
   freeTriggerText: string;
   /** その要素が disabled (サイト側のカウントダウン中) か */
   freeTriggerDisabled: boolean;
+  /** download2 の送信ボタンを見つけて data-pd-submit で印を付けたか */
+  submitTrigger: boolean;
+  submitTriggerText: string;
+  /** その送信ボタンが disabled (カウントダウン中) か */
+  submitTriggerDisabled: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 数字だけの要素を持たないカウントダウン (dailyuploads の「Seconds remaining: 32」) を本文から拾う。
+ * SNAPSHOT_JS へは source を埋め込む。ブラウザ内コードは文字列なので、正規表現をそこへ直接書くと
+ * エスケープが 1 段ずれて静かに壊れる。
+ */
+export const COUNTDOWN_TEXT_RE =
+  /(?:seconds?\s+remaining|please\s+wait)[^0-9]{0,12}([0-9]{1,3})|([0-9]{1,3})\s*(?:seconds?|secs?)\s+remaining/i;
+
+/**
+ * ボタンの文言と id の判定。**ブラウザ内コードには source を埋め込む** (COUNTDOWN_TEXT_RE と同じ理由)。
+ * TS 側に置いてあるのは、実機の HTML から拾った文言をテストで固定するため。
+ */
+
+/** 「無料ダウンロード」の入口に見える文言 */
+export const FREE_TEXT_RE =
+  /free download|regular download|slow speed download|slow download|download for free|normal download|無料ダウンロード|低速ダウンロード|通常ダウンロード/i;
+
+/** 有料へ誘う側。押してはいけない (frdl の「FREE PREMIUM DOWNLOAD」もこちら) */
+export const BAD_TEXT_RE = /premium|turbo|high speed|upgrade|buy|subscribe|プレミアム|高速|購入/i;
+
+/** ダウンロードを確定させるボタンの文言 (download2 の送信) */
+export const SUBMIT_TEXT_RE =
+  /start download|download now|create download link|get download link|generate download|proceed to download|continue to download|almost ready|click here to download|ダウンロードを開始|ダウンロードリンクを作成/i;
+
+/** id / name / class が「本物のダウンロードボタン」を示すもの */
+export const TRIGGER_ID_RE =
+  /free_dwn|method_free|fbtn|freebtn|free_btn|btnfree|btn_free|slow_btn|download_free|dlfree|downloadbtn|btn_download/i;
 
 /** ブラウザ内で評価する式。関数渡しにすると esbuild の __name が入るため文字列にする。 */
 const SNAPSHOT_JS = `(() => {
@@ -69,6 +115,11 @@ const SNAPSHOT_JS = `(() => {
     if (el.getClientRects().length === 0) return false;
     var cs = getComputedStyle(el);
     return cs.visibility !== 'hidden' && cs.display !== 'none';
+  };
+  var visSel = function (sel) {
+    var l = document.querySelectorAll(sel);
+    for (var i = 0; i < l.length; i++) if (vis(l[i])) return true;
+    return false;
   };
   var bodyText = (document.body ? document.body.innerText : '') || '';
   var forms = [];
@@ -107,16 +158,22 @@ const SNAPSHOT_JS = `(() => {
     var t = (cds[j].textContent || '').trim();
     if (/^[0-9]{1,3}$/.test(t)) { countdown = Number(t); break; }
   }
+  // 数字だけの要素が無い書き方 (dailyuploads の「Seconds remaining: 32」) は本文から拾う
+  if (countdown === null) {
+    var cm = bodyText.match(new RegExp(${JSON.stringify(COUNTDOWN_TEXT_RE.source)}, 'i'));
+    if (cm) countdown = Number(cm[1] || cm[2]);
+  }
 
   // ---- 「無料ダウンロード」の起点を探して印を付ける ----
   // XFileSharing のフォームが無いサイト (turbobit の Vue UI など) でも 1 歩目を進められるようにする。
-  var FREE_RE = /free download|regular download|slow speed download|slow download|download for free|無料ダウンロード|低速ダウンロード|通常ダウンロード/i;
-  var BAD_RE = /premium|turbo|high speed|upgrade|buy|subscribe|プレミアム|高速|購入/i;
+  var FREE_RE = new RegExp(${JSON.stringify(FREE_TEXT_RE.source)}, 'i');
+  var BAD_RE = new RegExp(${JSON.stringify(BAD_TEXT_RE.source)}, 'i');
+  var SUBMIT_RE = new RegExp(${JSON.stringify(SUBMIT_TEXT_RE.source)}, 'i');
   var marked = document.querySelectorAll('[data-pd-free]');
   for (var mi = 0; mi < marked.length; mi++) marked[mi].removeAttribute('data-pd-free');
   // id / name が「本物の無料ボタン」を示すものを最優先する。
   // 「Continue with Free Download」のような案内リンクより確実。
-  var ID_RE = /free_dwn|method_free|fbtn|freebtn|free_btn|slow_btn|download_free|dlfree/i;
+  var ID_RE = new RegExp(${JSON.stringify(TRIGGER_ID_RE.source)}, 'i');
   var freeTrigger = false;
   var freeTriggerText = '';
   var freeTriggerDisabled = false;
@@ -157,6 +214,57 @@ const SNAPSHOT_JS = `(() => {
     freeTriggerDisabled = !!best.disabled;
   }
 
+  // ---- ダウンロードリンク生成ボタン (download2 フォームの送信) ----
+  // カウントダウン中は disabled にしておくサイトがある (dailyuploads の
+  // 「Create Download Link」)。押せる状態かどうかをドライバに伝えて、空押しを避ける。
+  //
+  // **op=download2 のフォームは 1 ページに複数ある。** frdl は 3 つ持っていて、
+  // 先頭は有料枠 (押してはいけない)、2 つ目が無料枠、3 つ目は隠れたモーダル。
+  // 先頭を掴むと「押せるボタンが無い」と誤解して手動モードに落ちる。
+  // 押せるボタンを持っているフォームを選ぶ。
+  var submitTrigger = false;
+  var submitTriggerText = '';
+  var submitTriggerDisabled = false;
+  var marked2 = document.querySelectorAll('[data-pd-submit]');
+  for (var m2 = 0; m2 < marked2.length; m2++) marked2[m2].removeAttribute('data-pd-submit');
+
+  // needText: 文言か id で確証が取れたものだけを拾う (フォームの外を探すとき用)
+  var pickSubmit = function (root, needText) {
+    var sbs = root.querySelectorAll('#btn_download, button, input[type="submit"], input[type="button"]');
+    var pick = null;
+    var pickScore = 0;
+    for (var si = 0; si < sbs.length; si++) {
+      var b = sbs[si];
+      if (!vis(b)) continue;
+      var btxt = (b.innerText || b.value || '').trim();
+      var bidn = (b.getAttribute('id') || '') + ' ' + (b.getAttribute('name') || '') + ' ' + (typeof b.className === 'string' ? b.className : '');
+      if (BAD_RE.test(btxt)) continue;
+      var sc = 0;
+      if (SUBMIT_RE.test(btxt)) sc += 2;
+      if (ID_RE.test(bidn)) sc += 2;
+      if (FREE_RE.test(btxt)) sc += 1;
+      if (b.type === 'submit') sc += 1;
+      if (needText && sc === 0) continue;
+      if (b.disabled) sc -= 0.5; // 押せるものを優先しつつ、カウントダウン中の本命も拾う
+      if (!pick || sc > pickScore) { pickScore = sc; pick = b; }
+    }
+    return pick;
+  };
+
+  var sb = null;
+  for (var f2 = 0; f2 < fs.length && !sb; f2++) {
+    var op2 = fs[f2].querySelector('input[name="op"]');
+    if (op2 && op2.value === 'download2') sb = pickSubmit(fs[f2], false);
+  }
+  // フォームの外に置かれたボタン (JS で form.submit() を呼ぶ作り) も拾う
+  if (!sb) sb = pickSubmit(document, true);
+  if (sb) {
+    sb.setAttribute('data-pd-submit', '1');
+    submitTrigger = true;
+    submitTriggerText = ((sb.innerText || sb.value || '').trim()).slice(0, 60);
+    submitTriggerDisabled = !!sb.disabled;
+  }
+
   // ---- 表示中のリンク ----
   var anchors = [];
   var as = document.querySelectorAll('a[href]');
@@ -186,11 +294,20 @@ const SNAPSHOT_JS = `(() => {
     hcaptchaToken: val('textarea[name="h-captcha-response"]') || (hasHcaptcha ? val('textarea[name="g-recaptcha-response"]') : ''),
     imageCaptcha: !!(q('input[name="code"]') || q('input[name="captcha_response"]')),
     codeValue: val('input[name="code"]') || val('input[name="captcha_response"]'),
+    // 画面に出ているものだけを「人間の番」とみなす。隠れたウィジェットで人間を呼ぶと、
+    // 押すものが無い画面を見せることになる (frdl は 1 歩目から hCaptcha を隠して置いている)
+    turnstileVisible: visSel('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]'),
+    recaptchaVisible: !hasHcaptcha && visSel('.g-recaptcha, iframe[src*="recaptcha"]'),
+    hcaptchaVisible: visSel('.h-captcha, iframe[src*="hcaptcha.com"]'),
+    imageCaptchaVisible: visSel('input[name="code"], input[name="captcha_response"]'),
     anchors: anchors,
     bodyText: bodyText.slice(0, 4000),
     freeTrigger: freeTrigger,
     freeTriggerText: freeTriggerText,
-    freeTriggerDisabled: freeTriggerDisabled
+    freeTriggerDisabled: freeTriggerDisabled,
+    submitTrigger: submitTrigger,
+    submitTriggerText: submitTriggerText,
+    submitTriggerDisabled: submitTriggerDisabled
   };
 })()`;
 
@@ -207,7 +324,7 @@ export function isXfsLikely(snap: Snapshot): boolean {
 /** "1 hour, 50 minutes, 17 seconds" / "120 minutes" → ms */
 export function parseWait(text: string): number {
   let ms = 0;
-  for (const m of text.matchAll(/(\d+)\s*(hours?|minutes?|seconds?|std|min|sec|h|m|s)\b/gi)) {
+  for (const m of text.matchAll(/(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?|std|h|m|s)\b/gi)) {
     const n = Number(m[1]);
     const u = m[2].toLowerCase();
     if (u.startsWith('h') || u === 'std') ms += n * 3600_000;
@@ -217,10 +334,58 @@ export function parseWait(text: string): number {
   return ms;
 }
 
+/**
+ * ページ URL からファイル名を拾う。`/wiwex9e7i9sh/Goblin_Slayer_v11.rar.html` → `goblin_slayer_v11.rar`。
+ *
+ * XFileSharing は `<input name="fname">` を置くことが多いが、frdl のように置かないサイトもある。
+ * ファイル名が分からないと、別ドメインで配られる直リンク (e21.urleecher.com) を本物だと
+ * 言い切れない。URL に入っている分だけでも拾っておく。
+ */
+export function fnameFromUrl(url: string): string {
+  let last = '';
+  try {
+    last = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() ?? '');
+  } catch {
+    return '';
+  }
+  // 「.html」を被せる作り (frdl, katfile) を剥がす
+  const bare = last.replace(/\.(html?|php)$/i, '');
+  return FILE_EXT.test(bare) ? bare.toLowerCase() : '';
+}
+
+/**
+ * 比較用にファイル名をならす。区切り文字だけを落とす。
+ *
+ * サイトはページ URL とファイル本体で区切りを変えてくる。frdl は
+ * ページが `Goblin_Slayer_Manga_v15.rar.html`、直リンクが `Goblin Slayer Manga v15.rar` で、
+ * そのまま比べると別物になる。英数字以外を全部落とすと日本語のファイル名が空になり、
+ * 「何にでも一致する」危険な比較になるので、落とすのは区切り記号だけにする。
+ */
+export function normName(s: string): string {
+  let t = s;
+  try { t = decodeURIComponent(s); } catch { /* 壊れたエスケープはそのまま */ }
+  return t.toLowerCase().replace(/[\s_.\-+~'"()\[\]{}#,!&]+/g, '');
+}
+
+/**
+ * 今この画面で人間に押してもらう必要がある判定。無ければ null。
+ *
+ * **見えているウィジェットだけを見る。** DOM にあるだけで人間を呼ぶと、frdl のように
+ * 1 歩目から hCaptcha を隠して置いているサイトで「押すものが画面に無いのに人間待ち」になる。
+ */
+export function pendingChallenge(snap: Snapshot): 'turnstile' | 'recaptcha' | 'hcaptcha' | 'image' | null {
+  if (snap.turnstileVisible && !snap.turnstileToken) return 'turnstile';
+  if (snap.recaptchaVisible && !snap.recaptchaToken) return 'recaptcha';
+  if (snap.hcaptchaVisible && !snap.hcaptchaToken) return 'hcaptcha';
+  if (snap.imageCaptchaVisible && !snap.codeValue) return 'image';
+  return null;
+}
+
 /** 押す対象はスナップショットが data-pd-free で選んでいるので、それだけを使う */
 const FREE_BUTTONS = ['[data-pd-free="1"]'];
 
 const SUBMIT_BUTTONS = [
+  '[data-pd-submit="1"]',
   'form:has(input[name="op"][value="download2"]) #btn_download',
   'form:has(input[name="op"][value="download2"]) button[type="submit"]',
   'form:has(input[name="op"][value="download2"]) input[type="submit"]',
@@ -228,7 +393,7 @@ const SUBMIT_BUTTONS = [
   '#btn_download',
 ];
 
-const FILE_EXT = /\.(rar|zip|7z|tar|gz|mp4|mkv|avi|wmv|mov|mp3|flac|pdf|iso|exe|bin|dat|apk|epub|cbz|cbr|r\d\d|part\d+)(\?|$)/i;
+export const FILE_EXT = /\.(rar|zip|7z|tar|gz|mp4|mkv|avi|wmv|mov|mp3|flac|pdf|iso|exe|bin|dat|apk|epub|cbz|cbr|r\d\d|part\d+)(\?|$)/i;
 
 async function clickFirst(page: Page, selectors: string[], log: (m: string) => void): Promise<boolean> {
   for (const sel of selectors) {
@@ -248,14 +413,36 @@ async function clickFirst(page: Page, selectors: string[], log: (m: string) => v
 }
 
 /**
+ * 広告のポップアンダーに吸われるクリックへの対処。
+ *
+ * dailyuploads のようなサイトは、最初の何回かのクリックが広告タブを開くだけで
+ * 本来の遷移をしない (人間も「3〜4 回しつこく押す」ことになる)。ポップアップが
+ * 開いただけの空振りは押した回数に数えず、間を置かずに押し直す。
+ *
+ * 戻り値は「本来の遷移を起こしたかもしれないクリックができたか」。
+ */
+async function clickPersistently(ctx: DriverContext, selectors: string[], maxClicks = 6): Promise<boolean> {
+  for (let i = 0; i < maxClicks; i++) {
+    const before = ctx.popupCount();
+    ctx.focus();
+    if (!(await clickFirst(ctx.page, selectors, ctx.log))) return i > 0;
+    await sleep(1200);
+    if (ctx.downloadDetected()) return true;
+    if (ctx.popupCount() === before) return true;
+    ctx.log(`click swallowed by popup (${i + 1}/${maxClicks})`);
+  }
+  return true;
+}
+
+/**
  * ファイルらしい URL を選ぶ。
  *
  * 直リンクは別ドメインで配られることが多い (frdl.hk → e21.urleecher.com) ので、
  * 同一サイト条件では本物を捨ててしまう。代わりに「期待するファイル名と一致するか」
  * 「パスがファイルを指しているか」で判断し、別ドメインには確証を多めに要求する。
  */
-function pickDirectLink(snap: Snapshot, baseDomain: string, fname: string): string | null {
-  const want = fname ? decodeURIComponent(fname).toLowerCase() : '';
+export function pickDirectLink(snap: Snapshot, baseDomain: string, fname: string): { href: string; score: number } | null {
+  const want = normName(fname);
   let best: { href: string; score: number } | null = null;
   for (const a of snap.anchors) {
     let u: URL;
@@ -271,8 +458,8 @@ function pickDirectLink(snap: Snapshot, baseDomain: string, fname: string): stri
     try { pathname = decodeURIComponent(u.pathname); } catch { /* 壊れたエスケープ */ }
 
     let score = 0;
-    if (want && pathname.toLowerCase().endsWith(want)) score += 4;      // ファイル名そのもの
-    else if (want && decodeURIComponent(a.href).toLowerCase().includes(want)) score += 3;
+    if (want && normName(pathname).endsWith(want)) score += 4;          // ファイル名そのもの
+    else if (want && normName(a.href).includes(want)) score += 3;
     if (isFilePath) score += 1;
     if (/download/i.test(a.text)) score += 1;
     if (/\/d\/|\/dl\/|\/files\/|\/download\//i.test(u.pathname)) score += 1;
@@ -281,8 +468,11 @@ function pickDirectLink(snap: Snapshot, baseDomain: string, fname: string): stri
     if (!sameSite && !isFilePath) continue;
     if (score >= (sameSite ? 2 : 3) && (!best || score > best.score)) best = { href: a.href, score };
   }
-  return best?.href ?? null;
+  return best;
 }
+
+/** ファイル名まで一致した = フォームが残っていても本物とみなせる確度 */
+const DIRECT_SURE = 4;
 
 async function waitForDownload(ctx: DriverContext, ms: number): Promise<boolean> {
   const until = Date.now() + ms;
@@ -297,7 +487,12 @@ async function waitForDownload(ctx: DriverContext, ms: number): Promise<boolean>
  * 人間判定の待ち。まず数秒は自動通過 (Turnstile の managed モードなど) を期待して待ち、
  * ダメなら人間を呼ぶ。トークンが入ったら true。
  */
-async function waitForChallenge(ctx: DriverContext, kind: 'turnstile' | 'recaptcha' | 'hcaptcha', maxMs: number): Promise<boolean> {
+async function waitForChallenge(
+  ctx: DriverContext,
+  kind: 'turnstile' | 'recaptcha' | 'hcaptcha',
+  maxMs: number,
+  countdown: number | null = null,
+): Promise<boolean> {
   const label = kind === 'turnstile' ? 'Cloudflare Turnstile' : kind === 'recaptcha' ? 'reCAPTCHA' : 'hCaptcha';
   // hCaptcha は recaptchacompat モードだと g-recaptcha-response 側に入る
   const fields = kind === 'turnstile' ? ['cf-turnstile-response']
@@ -321,7 +516,13 @@ async function waitForChallenge(ctx: DriverContext, kind: 'turnstile' | 'recaptc
     }
     if (!asked && Date.now() - start > 8000) {
       asked = true;
-      ctx.askHuman(`あなたの番: ブラウザの ${label} のチェックを押してください。押せば続きは自動です`);
+      // サイトのカウントダウン中なら、それも伝える (押すのを待たせている訳ではないと分かる)
+      const tail = countdown !== null && countdown > 0
+        ? `。サイトの待ち時間 (${countdown} 秒) はその間に進みます` : '';
+      ctx.askHuman(`あなたの番: ブラウザの ${label} のチェックを押してください。押せば続きは自動です${tail}`);
+      // 画面外にあると「押すものが無い」ように見える。1 回だけ寄せる
+      await ctx.page.locator('.h-captcha, .g-recaptcha, .cf-turnstile').first()
+        .scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => { /* ignore */ });
     } else if (!asked) {
       ctx.setStatus(`自動操作中: ${label} の自動通過を待っています`);
     }
@@ -333,6 +534,7 @@ async function waitForChallenge(ctx: DriverContext, kind: 'turnstile' | 'recaptc
 
 export async function drive(ctx: DriverContext): Promise<DriveResult> {
   const { page } = ctx;
+  const urlFname = fnameFromUrl(ctx.url);
   let step1Tried = 0;
   let submitTried = 0;
   let fname = '';
@@ -365,6 +567,20 @@ export async function drive(ctx: DriverContext): Promise<DriveResult> {
     const hasDl1 = snap.forms.some((f) => f.op === 'download1');
     const hasDl2 = snap.forms.some((f) => f.op === 'download2');
 
+    // ---- 人間判定 -------------------------------------------------------------
+    // **カウントダウンより先に出す。** サイトが 60 秒数えている間にチェックを押して
+    // もらえれば、人間の待ちとサイトの待ちが重なる (frdl はこれで待ち時間が消える)。
+    // 1 歩目のページ (download1 フォームがある) では、Cloudflare の常時ウィジェットに
+    // 反応して無駄に人間を呼ばないよう、判定待ちはしない。
+    const challenge = hasDl1 ? null : pendingChallenge(snap);
+    if (challenge && challenge !== 'image') {
+      const label = challenge === 'turnstile' ? 'Turnstile' : challenge === 'recaptcha' ? 'reCAPTCHA' : 'hCaptcha';
+      if (!(await waitForChallenge(ctx, challenge, 10 * 60_000, snap.countdown))) {
+        return { kind: 'manual', reason: `${label} が通過しませんでした` };
+      }
+      continue;
+    }
+
     // ---- サイトのカウントダウン -----------------------------------------------
     if (snap.countdown !== null && snap.countdown > 0 && !hasDl1) {
       ctx.setStatus(`自動操作中: サイトの待ち時間 ${snap.countdown} 秒`);
@@ -372,60 +588,63 @@ export async function drive(ctx: DriverContext): Promise<DriveResult> {
       continue;
     }
 
-    // ---- 人間判定 -------------------------------------------------------------
-    // 1 歩目のページ (download1 フォームがある) では、Cloudflare の常時ウィジェットに
-    // 反応して無駄に人間を呼ばないよう、判定待ちはしない。
-    if (!hasDl1) {
-      if (snap.turnstile && !snap.turnstileToken) {
-        if (!(await waitForChallenge(ctx, 'turnstile', 10 * 60_000))) return { kind: 'manual', reason: 'Turnstile が通過しませんでした' };
-        continue;
+    if (challenge === 'image') {
+      ctx.askHuman('あなたの番: 画像の文字をブラウザの入力欄に入力してください。入力後は自動で送信します');
+      let last = '';
+      let stableSince = Date.now();
+      const until = Date.now() + 10 * 60_000;
+      while (Date.now() < until) {
+        if (ctx.downloadDetected()) return { kind: 'download-started' };
+        const s = await snapshot(page).catch(() => null);
+        const v = s?.codeValue ?? '';
+        if (v !== last) { last = v; stableSince = Date.now(); }
+        if (v.length >= 3 && Date.now() - stableSince > 3000) break;
+        await sleep(500);
       }
-      if (snap.recaptcha && !snap.recaptchaToken) {
-        if (!(await waitForChallenge(ctx, 'recaptcha', 10 * 60_000))) return { kind: 'manual', reason: 'reCAPTCHA が通過しませんでした' };
-        continue;
-      }
-      if (snap.hcaptcha && !snap.hcaptchaToken) {
-        if (!(await waitForChallenge(ctx, 'hcaptcha', 10 * 60_000))) return { kind: 'manual', reason: 'hCaptcha が通過しませんでした' };
-        continue;
-      }
-      if (snap.imageCaptcha && !snap.codeValue) {
-        ctx.askHuman('あなたの番: 画像の文字をブラウザの入力欄に入力してください。入力後は自動で送信します');
-        let last = '';
-        let stableSince = Date.now();
-        const until = Date.now() + 10 * 60_000;
-        while (Date.now() < until) {
-          if (ctx.downloadDetected()) return { kind: 'download-started' };
-          const s = await snapshot(page).catch(() => null);
-          const v = s?.codeValue ?? '';
-          if (v !== last) { last = v; stableSince = Date.now(); }
-          if (v.length >= 3 && Date.now() - stableSince > 3000) break;
-          await sleep(500);
-        }
-        ctx.humanDone();
-        if (!last) return { kind: 'manual', reason: '画像認証が入力されませんでした' };
-      }
+      ctx.humanDone();
+      if (!last) return { kind: 'manual', reason: '画像認証が入力されませんでした' };
     }
 
     // ---- 直リンクがあれば最優先 -------------------------------------------------
-    const direct = pickDirectLink(snap, ctx.baseDomain, fname);
-    if (direct && !hasDl2) {
+    // download2 のフォームが残っていても、次のどちらかなら直リンクが本物:
+    //   - ファイル名まで一致している
+    //   - そのフォームに押せるボタンが無い (frdl の最終ページは form の中に
+    //     <a class="btn">Download Now</a> を置くだけで、送信ボタンが存在しない)
+    const direct = pickDirectLink(snap, ctx.baseDomain, fname || urlFname);
+    if (direct && (!hasDl2 || !snap.submitTrigger || direct.score >= DIRECT_SURE)) {
       ctx.setStatus('自動操作中: 直リンクを取得しました');
-      ctx.log(`direct link: ${direct}`);
-      return { kind: 'direct', url: direct, filename: fname || undefined };
+      ctx.log(`direct link: ${direct.href} (score ${direct.score})`);
+      return { kind: 'direct', url: direct.href, filename: fname || undefined };
     }
 
     // ---- download2 フォームの送信 ----------------------------------------------
     if (hasDl2) {
-      if (submitTried >= 3) return { kind: 'manual', reason: 'ダウンロードフォームを送信しても先に進みませんでした' };
+      // カウントダウンが終わるまでボタンを disabled にするサイトがある
+      // (dailyuploads の「Create Download Link」)。押せるまで待つ。空押しすると
+      // 試行回数だけ減って人間待ちに落ちる。
+      if (snap.submitTrigger && snap.submitTriggerDisabled) {
+        waitStreak++;
+        if (waitStreak > 300) return { kind: 'manual', reason: 'ダウンロードボタンが押せる状態になりませんでした' };
+        ctx.setStatus(`自動操作中: サイトの待ち時間${snap.countdown !== null ? ` ${snap.countdown} 秒` : ''}`);
+        await sleep(1000);
+        continue;
+      }
+      waitStreak = 0;
+      if (submitTried >= 5) return { kind: 'manual', reason: 'ダウンロードボタンを押しても先に進みませんでした' };
       submitTried++;
-      ctx.setStatus('自動操作中: ダウンロードリンクを要求');
+      ctx.setStatus(`自動操作中: ダウンロードを要求${snap.submitTriggerText ? ` (${snap.submitTriggerText})` : ''}`);
       for (let i = 0; i < 10; i++) {
         const loc = page.locator(SUBMIT_BUTTONS[0]).first();
         if (await loc.count() > 0 && await loc.isEnabled().catch(() => false)) break;
         await sleep(500);
       }
-      const clicked = await clickFirst(page, SUBMIT_BUTTONS, ctx.log);
-      if (!clicked) return { kind: 'manual', reason: 'ダウンロードボタンが見つかりませんでした' };
+      const clicked = await clickPersistently(ctx, SUBMIT_BUTTONS);
+      if (!clicked) {
+        // 押せなかった。無効化された直後や描画待ちのことがあるので、回数を使い切るまで粘る
+        ctx.log('submit button not clickable');
+        await sleep(1500);
+        continue;
+      }
       await page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => { /* ignore */ });
       if (await waitForDownload(ctx, 5_000)) return { kind: 'download-started' };
       await sleep(1500);
@@ -445,10 +664,10 @@ export async function drive(ctx: DriverContext): Promise<DriveResult> {
         continue;
       }
       waitStreak = 0;
-      if (step1Tried >= 3) return { kind: 'manual', reason: 'Free Download ボタンを押しても先に進みませんでした' };
+      if (step1Tried >= 5) return { kind: 'manual', reason: 'Free Download ボタンを押しても先に進みませんでした' };
       step1Tried++;
       ctx.setStatus(`自動操作中: 無料ダウンロードを選択${snap.freeTriggerText ? ` (${snap.freeTriggerText})` : ''}`);
-      const clicked = await clickFirst(page, FREE_BUTTONS, ctx.log);
+      const clicked = await clickPersistently(ctx, FREE_BUTTONS);
       if (!clicked) { await sleep(1000); continue; }
 
       const started = Date.now();
@@ -459,7 +678,7 @@ export async function drive(ctx: DriverContext): Promise<DriveResult> {
         const s = await snapshot(page).catch(() => null);
         if (!s) continue;
         if (s.wait || s.notFound) break;
-        if (s.forms.some((f) => f.op === 'download2') || pickDirectLink(s, ctx.baseDomain, fname)) break;
+        if (s.forms.some((f) => f.op === 'download2') || pickDirectLink(s, ctx.baseDomain, fname || urlFname)) break;
         // ページが進んで人間判定が出た / 起点が変わった → 外側ループで扱う
         if (s.url !== snap.url) break;
         if (s.turnstile || s.recaptcha || s.hcaptcha || s.imageCaptcha) break;
@@ -470,7 +689,7 @@ export async function drive(ctx: DriverContext): Promise<DriveResult> {
         }
         if (sawCountdown) {
           // カウントダウン終了後にもう一度ボタンが必要なサイト向け
-          await clickFirst(page, FREE_BUTTONS, ctx.log);
+          await clickPersistently(ctx, FREE_BUTTONS);
           sawCountdown = false;
           continue;
         }

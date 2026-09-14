@@ -11,7 +11,10 @@ import type { Aria2Engine } from './engines/aria2.js';
 import type { Jd2Engine } from './engines/jd2.js';
 import type { BrowserEngine } from './engines/browser.js';
 import type { Router } from './router.js';
-import { seriesKeyOf } from './volume.js';
+import { parseItem, seriesKeyOf } from './volume.js';
+import type { PinaxConfig } from './pinax.js';
+import { missingVolumes } from './library.js';
+import http from 'node:http';
 
 const TOKEN = 'test-token';
 
@@ -20,10 +23,17 @@ const TOKEN = 'test-token';
  * router.resolve を解決しない Promise にしてあるので、投入されたジョブは resolving で止まり、
  * 外へは 1 本も通信が出ない (合流の検証もこの状態で安定する)。
  */
-async function harness() {
+async function harness(pinax?: PinaxConfig) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-srv-'));
   const dest = path.join(dir, 'downloads');
-  const cfg = { ...loadConfig(), dataDir: dir, apiToken: TOKEN };
+  // 棚を渡さないテストは繋ぎに行かない。**本物の config.json を読んでいるので、
+  // ここで潰さないと手元で動いている pinax にテストが話しかける**
+  const cfg = {
+    ...loadConfig(),
+    dataDir: dir,
+    apiToken: TOKEN,
+    pinax: pinax ?? { baseUrl: '', token: '', timeoutMs: 500 },
+  };
   const db = new Db(dir);
   const stub = (name: string) => ({ status: () => ({ name, available: false, detail: 'test' }) });
   const queue = new Queue(
@@ -60,7 +70,7 @@ test('items 投入はトークンが無いと 401', async () => {
   await app.close();
 });
 
-test('正しいトークンなら投入され、台帳に pending が積まれる', async () => {
+test('正しいトークンなら投入され、巻の解釈がジョブに焼かれる', async () => {
   const { app, db, user } = await harness();
   const res = await app.inject({
     method: 'POST', url: '/api/jobs',
@@ -76,9 +86,10 @@ test('正しいトークンなら投入され、台帳に pending が積まれ�
   assert.equal(body.created[0].meta.source, 'dryeyes:watch-1');
   assert.equal(body.created[0].meta.sourceKey, 'watch-1:abc');
 
-  const entry = db.findItemByJob(body.created[0].id);
-  assert.equal(entry?.status, 'pending');
-  assert.deepEqual([entry?.volumeFrom, entry?.volumeTo], [3, 3]);
+  // 台帳は無い。「同じ巻が別サイトから来た」の判定はジョブ自身が持つ
+  const job = db.getJob(body.created[0].id);
+  assert.equal(job?.seriesKey, seriesKeyOf('作品名'));
+  assert.deepEqual([job?.volumeFrom, job?.volumeTo], [3, 3]);
   await app.close();
 });
 
@@ -106,9 +117,9 @@ test('別サイトから同じ巻が来たら合流し、ジョブは増えな�
   // 候補が増えている
   assert.deepEqual(db.getJob(jobId)?.meta.mirrors, ['https://c.example/3']);
   // どこから合流したかが残る
-  const entry = db.findItemByJob(jobId);
-  assert.equal(entry?.mergedFrom.length, 1);
-  assert.equal(entry?.mergedFrom[0].source, 'dryeyes:watch-2');
+  const mergedFrom = db.getJob(jobId)?.meta.mergedFrom as { source: string }[];
+  assert.equal(mergedFrom.length, 1);
+  assert.equal(mergedFrom[0].source, 'dryeyes:watch-2');
   assert.equal(db.listJobs().length, 1);
   await app.close();
 });
@@ -170,130 +181,186 @@ test('UI からの urls 形式はトークン不要のまま通る', async () =>
   await app.close();
 });
 
-// ---- 台帳の管理画面 -------------------------------------------------------
-// 失敗した時に人が直せる口。台帳は「持っている」と言い切る場所なので、
-// 間違った行を消せないと、その巻は投入され続けても永久に落ちてこない。
+// ---- 画面から作品として登録する (DryEyes を通さない) ----------------------
+// 完結した作品や 1 冊だけのシリーズのために、URL と作者・作品名を画面で紐づける。
+// 通る道は DryEyes からの items と同じ (台帳・リネーム・ミラーを 2 通りにしない)。
 
-test('台帳の一覧は、ジョブの今と要確認の理由を添えて返す', async () => {
+test('画面から作品として登録できる。巻数を書いた時、貼った URL は同じ巻のミラーになる', async () => {
   const { app, db, user } = await harness();
-  const first = await app.inject({
-    method: 'POST', url: '/api/jobs', headers: { authorization: `Bearer ${TOKEN}` },
+  const res = await app.inject({
+    method: 'POST', url: '/api/jobs',
+    payload: {
+      userId: user.id,
+      urls: ['https://a.example/x.rar', 'https://b.example/x.rar'],
+      item: { title: '完結作品', author: '著者', volume: '3' },
+    },
+  });
+  assert.equal(res.statusCode, 201);
+  const body = res.json();
+  assert.equal(body.created.length, 1);
+  assert.equal(body.created[0].url, 'https://a.example/x.rar');
+  assert.deepEqual(body.created[0].meta.mirrors, ['https://b.example/x.rar']);
+  // リネームが作者と作品名を使えるよう、投入メタとして残る
+  assert.equal(body.created[0].meta.item.title, '完結作品');
+  assert.equal(body.created[0].meta.item.author, '著者');
+
+  // 巻の解釈が焼かれるので、あとで DryEyes から同じ巻が来ても二重に落とさない
+  const job = db.getJob(body.created[0].id);
+  assert.equal(job?.seriesKey, seriesKeyOf('完結作品'));
+  assert.deepEqual([job?.volumeFrom, job?.volumeTo], [3, 3]);
+  await app.close();
+});
+
+test('巻数を空けたら 1 行 1 巻。巻数は URL のファイル名から読む', async () => {
+  const { app, db, user } = await harness();
+  const res = await app.inject({
+    method: 'POST', url: '/api/jobs',
+    payload: {
+      userId: user.id,
+      urls: ['https://a.example/f/abc/Series_v01.rar.html', 'https://a.example/f/def/Series_v02.rar.html'],
+      item: { title: '古い作品' },
+    },
+  });
+  const body = res.json();
+  assert.equal(body.created.length, 2);
+  const vols = body.created.map((j: { id: string }) => {
+    const e = db.getJob(j.id);
+    return [e?.volumeFrom, e?.volumeTo];
+  });
+  assert.deepEqual(vols, [[1, 1], [2, 2]]);
+  // 巻が違うだけで同じ作品なので、キーは同じ
+  assert.equal(db.getJob(body.created[0].id)?.seriesKey, seriesKeyOf('古い作品'));
+  await app.close();
+});
+
+test('画面から作品として登録しても、棚が持っている巻は落とさない', async () => {
+  const shelf = await fakeShelf({ [seriesKeyOf('完結作品')]: [{ from: 1, to: 7 }] });
+  const { app, user } = await harness(shelf.cfg);
+
+  const res = await app.inject({
+    method: 'POST', url: '/api/jobs',
+    payload: { userId: user.id, urls: ['https://a.example/x.rar'], item: { title: '完結作品', volume: '3' } },
+  });
+  // 1 件も落とさないのは正常な結果なので 200。理由は画面に出す
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.created.length, 0);
+  assert.equal(body.skipped.length, 1);
+  assert.match(body.skipped[0].reason, /所持済み/);
+  await app.close();
+  await shelf.close();
+});
+
+test('作品名が無ければ今までどおりの urls 投入のまま', async () => {
+  const { app, db, user } = await harness();
+  const res = await app.inject({
+    method: 'POST', url: '/api/jobs',
+    payload: { userId: user.id, urls: ['https://a.example/x.rar'], item: { title: '  ', author: '著者' } },
+  });
+  assert.equal(res.statusCode, 201);
+  const body = res.json();
+  assert.equal(body.jobs.length, 1);
+  // 巻の解釈は焼かれない (作品が分からないものを判定に参加させると、別作品を巻き込む)
+  assert.equal(db.getJob(body.jobs[0].id)?.seriesKey, null);
+  await app.close();
+});
+
+// ---- 棚 (pinax) への問い合わせ --------------------------------------------
+
+/**
+ * 棚の代わり。読み方を本物と揃えるために parseItem を通す
+ * (pinax の seriesKeyOf はここからの移植で、同じ文字列から同じキーが出るのが前提)。
+ */
+async function fakeShelf(shelf: Record<string, { from: number; to: number }[]>) {
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const items = (JSON.parse(body).items ?? []) as Record<string, string | null>[];
+      const answers = items.map((q) => {
+        const parsed = parseItem({ title: q?.title ?? null, volume: q?.volume ?? null, rawText: q?.rawText ?? null });
+        const have = shelf[parsed.seriesKey] ?? [];
+        if (parsed.volumeFrom === null || parsed.volumeTo === null || have.length === 0) {
+          return { parsed, owned: false, missing: null, series: [], reason: '蔵書にこの作品がありません' };
+        }
+        const missing = missingVolumes({ from: parsed.volumeFrom, to: parsed.volumeTo }, have);
+        return {
+          parsed, owned: missing.length === 0, missing, series: [],
+          reason: missing.length === 0 ? '所持済み (棚にあります)' : `未所持: ${missing.join(',')}`,
+        };
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ answers }));
+    });
+  });
+  await new Promise<void>((ok) => server.listen(0, '127.0.0.1', () => ok()));
+  const port = (server.address() as { port: number }).port;
+  return {
+    cfg: { baseUrl: `http://127.0.0.1:${port}`, token: '', timeoutMs: 2000 } as PinaxConfig,
+    close: () => new Promise<void>((ok) => server.close(() => ok())),
+  };
+}
+
+test('棚が持っている巻は投入されない', async () => {
+  const shelf = await fakeShelf({ [seriesKeyOf('作品名')]: [{ from: 1, to: 6 }] });
+  const { app, user } = await harness(shelf.cfg);
+
+  const res = await app.inject({
+    method: 'POST', url: '/api/jobs',
+    headers: { authorization: `Bearer ${TOKEN}` },
     payload: { userId: user.id, items: [item('作品名 第3巻', ['https://a.example/3'])] },
   });
-  const jobId = first.json().created[0].id;
-
-  const ok = await app.inject({ method: 'GET', url: `/api/items?userId=${user.id}` });
-  assert.equal(ok.json().items[0].job.id, jobId);
-  assert.deepEqual(ok.json().items[0].warnings, []);
-
-  // ジョブだけ消えると、この行は誰も進めないまま同じ巻の投入を吸い込み続ける
-  db.deleteJob(jobId);
-  const res = await app.inject({ method: 'GET', url: `/api/items?userId=${user.id}` });
-  const row = res.json().items[0];
-  assert.equal(row.job, null);
-  assert.match(row.warnings.join(), /ジョブが残っていません/);
+  const body = res.json();
+  assert.equal(body.created.length, 0);
+  assert.equal(body.skipped.length, 1);
+  assert.match(body.skipped[0].reason, /所持済み/);
   await app.close();
+  await shelf.close();
 });
 
-test('作品名を直すと series キーも導き直され、別々のキーだった行が 1 つにまとまる', async () => {
-  const { app, db, user } = await harness();
-  // 作品名の分からないまま投入され、生の文字列 (ミラーのホスト名まで込み) から
-  // キーが作られた状態。同じ作品なのに `s` の有無だけで 2 つに割れている
-  db.insertItem({ userId: user.id, seriesKey: 'sakuhinsraakatfile', volumeFrom: 1, volumeTo: 2, status: 'done', title: null, rawText: 'v01-02s.rar katfile' });
-  db.insertItem({ userId: user.id, seriesKey: 'sakuhinraakatfile', volumeFrom: 5, volumeTo: 5, status: 'done', title: null, rawText: 'v05.rar katfile' });
+/**
+ * DryEyes が候補一覧に「もう持っている」の印を出すために叩く口。
+ * **答えの出どころが台帳から棚に変わっても、返す形は変えていない** —
+ * 聞く側から見れば聞くことも答えも同じなので、向こうを直さずに済ませる。
+ */
+test('items/check は投入せずに判定だけ返す', async () => {
+  const shelf = await fakeShelf({ [seriesKeyOf('作品名')]: [{ from: 1, to: 6 }] });
+  const { app, db, user } = await harness(shelf.cfg);
 
-  for (const seriesKey of ['sakuhinsraakatfile', 'sakuhinraakatfile']) {
-    const res = await app.inject({
-      method: 'POST', url: '/api/items/relabel',
-      payload: { userId: user.id, seriesKey, title: '作品名', author: '著者' },
-    });
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.json().changed, 1);
-  }
-
-  const keys = new Set(db.listItems({ userId: user.id }).map((i) => i.seriesKey));
-  assert.deepEqual([...keys], [seriesKeyOf('作品名')]);
-
-  // 直したことの意味はこれ。同じ巻が別サイトから来ても、もう落としに行かなくなる
-  const again = await app.inject({
-    method: 'POST', url: '/api/jobs', headers: { authorization: `Bearer ${TOKEN}` },
-    payload: { userId: user.id, items: [item('作品名 第5巻', ['https://b.example/5'])] },
+  const res = await app.inject({
+    method: 'POST', url: '/api/items/check',
+    headers: { authorization: `Bearer ${TOKEN}` },
+    payload: {
+      userId: user.id,
+      items: [
+        item('作品名 第3巻', ['https://a.example/3']),
+        item('作品名 第9巻', ['https://a.example/9']),
+      ],
+    },
   });
-  assert.equal(again.json().created.length, 0);
-  assert.equal(again.json().skipped.length, 1);
+  assert.equal(res.statusCode, 200);
+  const [owned, notYet] = res.json().results;
+
+  assert.equal(owned.state, 'skip');
+  assert.match(owned.reason, /所持済み/);
+  assert.equal(owned.sourceKey, 'watch-1:abc');
+  assert.equal(owned.seriesKey, seriesKeyOf('作品名'));
+  assert.deepEqual([owned.volumeFrom, owned.volumeTo], [3, 3]);
+
+  assert.equal(notYet.state, 'new');
+  assert.equal(notYet.reason, null);
+
+  // 調べただけで何も起きない
+  assert.equal(db.listJobs().length, 0);
   await app.close();
+  await shelf.close();
 });
 
-test('作品名を直す口は、対象がいなければ 404・空の名前は 400', async () => {
+test('items/check はトークンが無いと 401', async () => {
   const { app, user } = await harness();
-  const missing = await app.inject({
-    method: 'POST', url: '/api/items/relabel',
-    payload: { userId: user.id, seriesKey: 'nothing', title: '作品名' },
+  const res = await app.inject({
+    method: 'POST', url: '/api/items/check',
+    payload: { userId: user.id, items: [item('作品名 第3巻', ['https://a.example/3'])] },
   });
-  assert.equal(missing.statusCode, 404);
-
-  const blank = await app.inject({
-    method: 'POST', url: '/api/items/relabel',
-    payload: { userId: user.id, seriesKey: 'nothing', title: '   ' },
-  });
-  assert.equal(blank.statusCode, 400);
-  await app.close();
-});
-
-test('読み違えた巻数を直せる。読めない値は弾く', async () => {
-  const { app, db, user } = await harness();
-  const row = db.insertItem({
-    userId: user.id, seriesKey: seriesKeyOf('作品名'), volumeFrom: 2024, volumeTo: 2024,
-    status: 'have', title: '作品名',
-  });
-
-  const ok = await app.inject({ method: 'PATCH', url: `/api/items/${row.id}`, payload: { volumes: '1-7' } });
-  assert.equal(ok.statusCode, 200);
-  assert.deepEqual([db.getItem(row.id)?.volumeFrom, db.getItem(row.id)?.volumeTo], [1, 7]);
-
-  // 読めない値を黙って通すと、重なり判定から静かに外れて二重取得が始まる
-  const bad = await app.inject({ method: 'PATCH', url: `/api/items/${row.id}`, payload: { volumes: 'ぜんぶ' } });
-  assert.equal(bad.statusCode, 400);
-  assert.equal(db.getItem(row.id)?.volumeFrom, 1);
-  await app.close();
-});
-
-test('1 行の作品名を直すと、その行のキーも一緒に動く', async () => {
-  const { app, db, user } = await harness();
-  const row = db.insertItem({
-    userId: user.id, seriesKey: 'garbage', volumeFrom: 3, volumeTo: 3, status: 'have', title: null,
-  });
-  await app.inject({ method: 'PATCH', url: `/api/items/${row.id}`, payload: { title: '作品名 第3巻', author: '著者' } });
-
-  const next = db.getItem(row.id)!;
-  // 巻数はキーから落ちるので、次の巻が来ても同じ作品として突き合わせられる
-  assert.equal(next.seriesKey, seriesKeyOf('作品名'));
-  assert.equal(next.author, '著者');
-  assert.equal(next.volumeFrom, 3);
-  await app.close();
-});
-
-test('台帳の行はまとめて消せる。消せば同じ巻をまた落としに行く', async () => {
-  const { app, db, user } = await harness();
-  const ids = [1, 2, 3].map((v) => db.insertItem({
-    userId: user.id, seriesKey: seriesKeyOf('作品名'), volumeFrom: v, volumeTo: v,
-    status: 'have', title: '作品名',
-  }).id);
-
-  const before = await app.inject({
-    method: 'POST', url: '/api/jobs', headers: { authorization: `Bearer ${TOKEN}` },
-    payload: { userId: user.id, items: [item('作品名 第2巻', ['https://a.example/2'])] },
-  });
-  assert.equal(before.json().created.length, 0);
-
-  const res = await app.inject({ method: 'POST', url: '/api/items/delete', payload: { ids } });
-  assert.equal(res.json().deleted, 3);
-  assert.equal(db.listItems({ userId: user.id }).length, 0);
-
-  const after = await app.inject({
-    method: 'POST', url: '/api/jobs', headers: { authorization: `Bearer ${TOKEN}` },
-    payload: { userId: user.id, items: [item('作品名 第2巻', ['https://a.example/2'])] },
-  });
-  assert.equal(after.json().created.length, 1);
+  assert.equal(res.statusCode, 401);
   await app.close();
 });

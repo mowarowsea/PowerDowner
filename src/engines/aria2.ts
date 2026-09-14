@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Config } from '../config.js';
 import type { Job, ResolvedDownload, EngineStatus } from '../types.js';
 import { bus, log } from '../events.js';
+import { splitFilename, uniqueName } from '../naming.js';
 
 export interface Progress {
   bytesTotal: number;
@@ -268,6 +269,10 @@ export class Aria2Engine {
     if (r.headers?.length) opts.header = r.headers;
     if (r.checksum) opts.checksum = r.checksum;
     if (r.options) Object.assign(opts, r.options);
+    // 連番付けは r.options の out も含めて最後に。ここを通さないと
+    // 同名が既にある時に aria2 が code 13 で弾いて 1 バイトも落ちない
+    const out = opts.out;
+    if (typeof out === 'string') opts.out = outNameFor(job.destDir, out, (p) => fs.existsSync(p));
     const gid = await this.call<string>('aria2.addUri', [[r.url], opts]);
     this.gidToJob.set(gid, job.id);
     return gid;
@@ -318,6 +323,44 @@ export class Aria2Engine {
       });
     }
   }
+}
+
+/**
+ * aria2 に渡す保存名を決める。同名が既にあれば `... (2).rar` と後ろに連番を付ける。
+ *
+ * aria2 は `--allow-overwrite=false --auto-file-renaming=false` で回している。
+ * 上書きさせないのは、同じ巻でも中身が違う (画質違い・修正版) ことがあるため
+ * (`src/naming.ts` の `uniqueName` と同じ理由)。aria2 自身の連番に任せないのは、
+ * `xxx.part2.rar` を `xxx.part2.1.rar` のように**拡張子側**に付けてしまい、
+ * 分割書庫のベース名が揃わなくなって解凍できなくなるため。
+ *
+ * ただし中断したものの続き (`*.aria2` が残っている) は同じ名前で掴み直す。
+ * ここで連番を付けると、落としかけを置き去りにして最初からやり直しになる。
+ */
+export function outNameFor(dir: string, file: string, exists: (p: string) => boolean): string {
+  if (exists(path.join(dir, `${file}.aria2`))) return file;
+  // 落としかけ (本体 + *.aria2) の名前も、他所が掴んでいるものとして避ける
+  const taken = (name: string): boolean => {
+    const p = path.join(dir, name);
+    return exists(p) || exists(`${p}.aria2`);
+  };
+  if (!taken(file)) return file;
+
+  // 書庫は `src/naming.ts` の規則に委ねる (分割書庫の連番を拡張子の手前へ戻すのはあちらの仕事)
+  const { stem, ext } = splitFilename(file);
+  if (ext) return uniqueName(dir, file, (p) => exists(p) || exists(`${p}.aria2`));
+
+  // 書庫以外 (mp4 など) は素の拡張子を保ったまま連番を挟む。`splitFilename` は
+  // 知らない拡張子を本体側に残すので、そのまま渡すと `動画.mp4 (2)` になって開けなくなる
+  const raw = path.extname(stem);
+  // 既に付いている連番は付け直す。`splitFilename` が書庫でそうしているのと揃える
+  // (揃えないと 3 本目が `動画 (2) (2).mp4` になる)
+  const base = (raw ? stem.slice(0, -raw.length) : stem).replace(/\s*\(\d{1,3}\)$/, '');
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${base} (${i})${raw}`;
+    if (!taken(candidate)) return candidate;
+  }
+  return `${base} (${Date.now()})${raw}`;
 }
 
 function fileNameOf(st: Aria2Status): string | undefined {

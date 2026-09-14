@@ -1,12 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BrowserContext, Page, Download } from 'playwright-core';
+import type { BrowserContext, Page, Download, Route } from 'playwright-core';
 import type { Config } from '../config.js';
 import type { Job, EngineStatus, ResolvedDownload } from '../types.js';
 import { bus, log } from '../events.js';
 import { toast } from '../notify.js';
 import type { Progress } from './aria2.js';
-import { drive, snapshot, isXfsLikely, type DriverContext } from '../drivers/xfs.js';
+import { drive, snapshot, isXfsLikely, FILE_EXT, type DriverContext } from '../drivers/xfs.js';
 
 /**
  * 人間ハンドオフ用のブラウザエンジン。
@@ -52,6 +52,19 @@ interface Current {
   blocked: string[];
   /** ページのコンソール出力。Turnstile は失敗理由をエラーコードで console に出す */
   console: string[];
+  /**
+   * このジョブのページが開いたポップアップの数。クリックがポップアンダー広告を
+   * 開いただけで本来の遷移をしないサイト (dailyuploads) があるので、ドライバが
+   * 「空振りのクリック」を見分けるのに使う。
+   */
+  popups: number;
+  /**
+   * このサイトで強い広告対策 (browser.adGuardHosts) を効かせるか。
+   * window.open の封じ込めと、メインフレームを他所へ飛ばす遷移の遮断が有効になる。
+   */
+  guard: boolean;
+  /** 広告のページから引き返した回数。止めそこねた時の保険なので、何度も繰り返さない */
+  recoveries: number;
 }
 
 interface Waiting {
@@ -92,11 +105,14 @@ const AD_HOSTS = [
   'mgid.com', 'revcontent.com', 'zedo.com', 'trafficjunky.net', 'a-ads.com', 'adservice.google.com',
 ];
 
-/** AD_HOSTS だけを横取りするためのパターン。これ以外の通信には一切触らない */
-const AD_URL_RE = new RegExp(
-  `^https?://([^/]*\\.)?(${AD_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})([:/]|$)`,
-  'i',
-);
+/**
+ * AD_HOSTS (と config の browser.adHosts) だけを横取りするためのパターン。
+ * これ以外の通信には一切触らない。
+ */
+export function adUrlRe(extra: string[] = []): RegExp {
+  const hosts = [...new Set([...AD_HOSTS, ...extra.map((h) => h.trim().toLowerCase()).filter(Boolean)])];
+  return new RegExp(`^https?://([^/]*\\.)?(${hosts.map((h) => h.replace(/\./g, '\\.')).join('|')})([:/]|$)`, 'i');
+}
 
 /**
  * サイトのカウントダウンはウィンドウのフォーカスが外れると止まる作りが多い
@@ -116,6 +132,56 @@ const KEEP_AWAKE_SCRIPT = `(() => {
   document.addEventListener('webkitvisibilitychange', swallow, true);
   window.addEventListener('focus', function () { /* keep */ }, true);
 })();`;
+
+/** popupGuardScript が握り潰した window.open を知らせる目印 */
+const POPUP_BLOCKED_MARK = '__pd_popup_blocked';
+
+/**
+ * ポップアンダー広告を「開かせない」。
+ *
+ * dailyuploads はボタンの onclick が window.open で広告を開き、そのクリックは本来の遷移をしない。
+ * 開いてから閉じるのでは画面を数秒奪われるうえ、ドライバから見ると空振りのクリックになる。
+ * ここで **他所へ向かう window.open だけ** 握り潰し、サイト自身のウィンドウは通す。
+ *
+ * 返り値を null にすると `w.document.write(...)` のようなコードが例外で止まり、
+ * ページ側の処理が丸ごと死ぬことがある。何をしても無害なダミーを返すこと。
+ *
+ * KEEP_AWAKE_SCRIPT と同じく、効かせるのは browser.adGuardHosts のサイトだけ
+ * (ページ読み込み前のスクリプト差し込みそのものが自動化の痕跡になる)。
+ */
+export function popupGuardScript(base: string): string {
+  return `(() => {
+  var BASE = ${JSON.stringify(base)};
+  var ours = function (u) {
+    try {
+      if (!u) return false;
+      var h = new URL(String(u), location.href).hostname.toLowerCase();
+      return h === BASE || h.endsWith('.' + BASE);
+    } catch (e) { return false; }
+  };
+  var noop = function () {};
+  var stub = function () {
+    return {
+      closed: true, close: noop, focus: noop, blur: noop, postMessage: noop, opener: null,
+      document: { write: noop, writeln: noop, open: noop, close: noop },
+      location: { href: '', replace: noop, assign: noop, reload: noop },
+    };
+  };
+  var open = window.open;
+  try {
+    Object.defineProperty(window, 'open', {
+      configurable: true,
+      value: function (u) {
+        if (ours(u)) return open.apply(window, arguments);
+        // 握り潰したことをエンジンへ伝える。ドライバはこれを「広告に吸われたクリック」として
+        // 数え、押した回数に入れずに押し直す (clickPersistently)
+        try { console.warn('${POPUP_BLOCKED_MARK}', String(u || 'about:blank').slice(0, 120)); } catch (e) { /* ignore */ }
+        return stub();
+      },
+    });
+  } catch (e) { /* ignore */ }
+})();`;
+}
 
 /**
  * 画面下の状態バナー。
@@ -145,6 +211,35 @@ function baseDomainOf(hostname: string): string {
   return parts.length <= 2 ? hostname.toLowerCase() : parts.slice(-2).join('.');
 }
 
+function pathnameOf(url: string): string {
+  try { return decodeURIComponent(new URL(url).pathname); } catch { return url; }
+}
+
+/**
+ * 広告対策を強めたサイトで、メインフレームのこの遷移を止めるか。
+ *
+ * 待ち時間の最中に広告がページごと飛ばしてくるのを防ぐためのもの。
+ * 直リンクは別ドメインで配られることがあるので、ファイルへ向かう遷移は通す
+ * (ここで止めるとダウンロードそのものが始まらない)。
+ */
+export function blocksNavigation(url: string, bases: Iterable<string>): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  // about:blank / blob: / data: には触らない。ダウンロードの受け皿になっていることがある
+  if (!/^https?:$/.test(u.protocol)) return false;
+  const host = u.hostname.toLowerCase();
+  if ([...bases].some((b) => host === b || host.endsWith('.' + b))) return false;
+  return !FILE_EXT.test(pathnameOf(url));
+}
+
+/** 設定のホスト一覧に当たるか。設定には frdl.hk とも www.frdl.hk とも書かれうる */
+export function listedHost(base: string, list: string[]): boolean {
+  return list.some((h) => {
+    const x = h.trim().toLowerCase();
+    return !!x && (base === x || base.endsWith('.' + x) || x.endsWith('.' + base));
+  });
+}
+
 export class BrowserEngine {
   readonly name = 'browser' as const;
   available = false;
@@ -158,6 +253,8 @@ export class BrowserEngine {
   private current = new Map<string, Current>();
   /** タブ (ポップアップ含む) がどのジョブのものか。リクエスト遮断と download 検知の帰属に使う */
   private pageOwner = new WeakMap<Page, Current>();
+  /** 遮断する広告 URL のパターン。config の browser.adHosts を足して起動時に組み立てる */
+  private adRe = adUrlRe();
   private opening = false;
   private nextAgain = false;
   private wakeTimer: NodeJS.Timeout | null = null;
@@ -297,12 +394,15 @@ export class BrowserEngine {
       });
       // 広告配信網の URL だけを横取りする。'**/*' で全部横取りすると Cloudflare Turnstile が
       // 自動化とみなして「Verification failed」になるので、人間判定とサイト本体の通信には触らない。
-      await ctx.route(AD_URL_RE, (route) => {
+      this.adRe = adUrlRe(this.cfg.browser.adHosts ?? []);
+      await ctx.route(this.adRe, (route) => {
         const req = route.request();
         let owner: Current | undefined;
         try { owner = this.pageOwner.get(req.frame().page()); } catch { /* frame を持たない要求 */ }
         if (owner && owner.blocked.length < 200) owner.blocked.push(`${req.resourceType()} ${req.url().slice(0, 200)}`);
-        return route.abort();
+        // 'aborted' (net::ERR_ABORTED) で落とすこと。既定の 'failed' はページ遷移だった場合に
+        // 「このページに到達できません」を描いてしまい、待っていたページごと失われる
+        return route.abort('aborted');
       });
       ctx.on('page', (p) => this.attachPage(p));
       for (const p of ctx.pages()) this.attachPage(p);
@@ -328,19 +428,44 @@ export class BrowserEngine {
     page.opener().then((opener) => {
       if (!opener) return;
       const owner = this.pageOwner.get(opener);
-      if (owner) this.pageOwner.set(page, owner);
+      if (owner) {
+        this.pageOwner.set(page, owner);
+        // 中身が何であれ「クリックがポップアップに化けた」ことは記録する。
+        // ドライバはこの数の増加を見て、空振りのクリックを押し直す。
+        owner.popups++;
+      }
+      // 一度「閉じた」「これは残す」と決めたら、以降は判定しない
+      let settled = false;
+      const close = (why: string) => {
+        if (settled || page.isClosed()) return;
+        settled = true;
+        log(`[browser] ポップアップを閉じました: ${why}`);
+        page.close().catch(() => { /* ignore */ });
+        // 閉じるとフォーカスがどこへ行くか分からない。操作中のページを前面に戻す。
+        if (owner && !owner.handled) owner.page.bringToFront().catch(() => { /* ignore */ });
+      };
       const check = () => {
-        if (page.isClosed()) return;
+        if (settled || page.isClosed()) return;
         const u = page.url();
-        if (!u || u === 'about:blank') return;
+        if (!u || u === 'about:blank') return;   // 行き先がまだ決まっていない
+        // 新しいタブでダウンロードを始めるサイトがある。閉じると download の受け皿ごと消える
+        if (owner?.downloadSeen || FILE_EXT.test(pathnameOf(u))) { settled = true; return; }
         const bases = owner ? [...owner.bases] : [];
         let host = '';
         try { host = new URL(u).hostname.toLowerCase(); } catch { return; }
-        if (bases.some((b) => host === b || host.endsWith('.' + b))) return;
-        log(`[browser] ポップアップを閉じました: ${u.slice(0, 100)}`);
-        page.close().catch(() => { /* ignore */ });
+        if (bases.some((b) => host === b || host.endsWith('.' + b))) { settled = true; return; }
+        close(u.slice(0, 100));
       };
-      setTimeout(check, 1500);
+      // 行き先が決まった瞬間に閉じる。時間で見張るだけだと、その間ずっと画面を奪われたままになる
+      page.on('framenavigated', (f) => { if (f === page.mainFrame()) check(); });
+      check();
+      // about:blank のまま居座るポップアンダーもいる。ダウンロードの受け皿である可能性が
+      // 消える程度には待ってから閉じる。
+      setTimeout(() => {
+        if (settled || page.isClosed()) return;
+        if (owner?.downloadSeen) { settled = true; return; }
+        if (page.url() === 'about:blank') close('about:blank のまま開かれた広告タブ');
+      }, 1500);
       setTimeout(check, 4000);
     }).catch(() => { /* ignore */ });
   }
@@ -349,22 +474,44 @@ export class BrowserEngine {
     try {
       const ctx = await this.ensureContext();
       const page = await ctx.newPage();
-      const cur: Current = { job, base, bases: new Set([base]), page, timer: null as unknown as NodeJS.Timeout, handled: false, downloadSeen: false, attempts, blocked: [], console: [] };
+      const guard = listedHost(base, this.cfg.browser.adGuardHosts ?? []);
+      const cur: Current = { job, base, bases: new Set([base]), page, timer: null as unknown as NodeJS.Timeout, handled: false, downloadSeen: false, attempts, blocked: [], console: [], popups: 0, guard, recoveries: 0 };
       const note = (s: string) => { if (cur.console.length < 300) cur.console.push(`${new Date().toISOString().slice(11, 19)} ${s}`); };
-      page.on('console', (m) => note(`${m.type()}: ${m.text().slice(0, 300)}`));
+      page.on('console', (m) => {
+        const text = m.text();
+        // 握り潰した window.open も「クリックが広告に吸われた」1 回として数える。
+        // ドライバはこの増加を見て、押した回数に入れずに押し直す (clickPersistently)
+        if (text.includes(POPUP_BLOCKED_MARK)) cur.popups++;
+        note(`${m.type()}: ${text.slice(0, 300)}`);
+      });
       page.on('pageerror', (e) => note(`pageerror: ${e.message.split('\n')[0].slice(0, 300)}`));
       // 可視状態の偽装は人間判定に嫌われる (Turnstile が Verification failed になる)。
       // カウントダウンを自前で止めるサイトにだけ効かせる。他はブラウザ起動フラグ側で足りる。
-      const keepAwake = this.cfg.browser.keepAwakeHosts ?? [];
-      if (keepAwake.some((h) => base === h || base.endsWith('.' + h) || h.endsWith('.' + base))) {
+      if (listedHost(base, this.cfg.browser.keepAwakeHosts ?? [])) {
         await page.addInitScript(KEEP_AWAKE_SCRIPT).catch(() => { /* ignore */ });
+      }
+      if (guard) {
+        // ポップアンダーは「閉じる」より「開かせない」。閉じるだけでは画面を数秒奪われる
+        await page.addInitScript(popupGuardScript(base)).catch(() => { /* ignore */ });
+        // 待ち時間の最中に広告がページごと他所へ飛ばしてくる。飛ばされてから戻ったのでは
+        // カウントダウンが振り出しに戻るので、メインフレームの遷移そのものを止める。
+        // 止められた遷移は現在のページを壊さない (net::ERR_ABORTED) ので、秒数は進み続ける。
+        await page.route('**/*', (route) => this.guardNavigation(cur, route)).catch(() => { /* ignore */ });
+        log(`[browser] ${job.id}: ${base} は広告対策を強めて開きます`);
       }
       page.on('framenavigated', (f) => {
         if (f !== page.mainFrame()) return;
-        try {
-          const b = baseDomainOf(new URL(f.url()).hostname);
-          if (!cur.bases.has(b)) { cur.bases.add(b); log(`[browser] ${job.id}: ${base} → ${b} へ移動したので同一サイト扱いに追加`); }
-        } catch { /* about:blank など */ }
+        const u = f.url();
+        let b = '';
+        try { b = baseDomainOf(new URL(u).hostname); } catch { return; }   // about:blank など
+        if (cur.bases.has(b)) return;
+        // 広告配信網は「サイトの続き」ではない。足すと、そこが開くポップアップまで
+        // 自分のサイト扱いになって閉じられなくなる
+        if (this.adRe.test(u)) { this.backToJob(cur, u); return; }
+        // 止めそこねた遷移 (エラーページへの着地を含む)。待っていたページへ戻す
+        if (guard && blocksNavigation(u, cur.bases)) { this.backToJob(cur, u); return; }
+        cur.bases.add(b);
+        log(`[browser] ${job.id}: ${base} → ${b} へ移動したので同一サイト扱いに追加`);
       });
       cur.timer = setTimeout(() => {
         if (!cur.handled) this.fail(job.id, `ブラウザ操作が ${this.cfg.browser.timeoutMinutes} 分以内に完了しなかったため中断しました`);
@@ -392,6 +539,50 @@ export class BrowserEngine {
     } catch (e) {
       this.fail(job.id, `ブラウザを起動できません: ${(e as Error).message}`);
     }
+  }
+
+  /**
+   * 広告のページに着地してしまったときに、待っていたページへ戻す。
+   *
+   * 本筋は guardNavigation で遷移を止めること (戻るとカウントダウンが振り出しに戻るため)。
+   * これは止めそこねた時の保険なので、繰り返さずに諦める。
+   */
+  private backToJob(cur: Current, url: string): void {
+    if (cur.handled || cur.page.isClosed() || cur.recoveries >= 3) return;
+    cur.recoveries++;
+    log(`[browser] ${cur.job.id}: 広告のページへ着地したので戻ります (${url.slice(0, 120)})`);
+    void (async () => {
+      const back = await cur.page.goBack({ timeout: 15_000 }).catch(() => null);
+      if (back || cur.handled || cur.page.isClosed()) return;
+      // 広告が履歴を汚していて戻れない。最初のページからやり直す
+      await cur.page.goto(cur.job.url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+        .catch(() => { /* ドライバが次の巡回で気づく */ });
+    })();
+  }
+
+  /**
+   * 広告によるページ遷移を止める (browser.adGuardHosts のサイトだけ)。
+   *
+   * 見るのは**メインフレームの遷移だけ**。サブリソースと iframe には触らない
+   * (全通信に手を入れると自動化の signature になる。それが許されるのは
+   * 人間判定の緩いサイトに限る、というのが adGuardHosts の意味)。
+   *
+   * 自分で処理しないときは `continue()` ではなく `fallback()` を使うこと。
+   * `continue()` はページ側の route で打ち止めになり、コンテキスト側に仕掛けた
+   * 広告配信網の遮断 (AD_HOSTS) をすり抜けてしまう。
+   *
+   * 止めるときは **`abort('aborted')`** を使うこと。既定の `abort()` は `net::ERR_FAILED` で、
+   * Chromium がその URL のままエラーページ (「このページに到達できません」) を描いてしまい、
+   * 待っていたページごと失われる。`net::ERR_ABORTED` だけが「無かったこと」にできる。
+   */
+  private guardNavigation(cur: Current, route: Route): void {
+    const req = route.request();
+    if (!req.isNavigationRequest() || req.frame() !== cur.page.mainFrame()) { void route.fallback(); return; }
+    const url = req.url();
+    if (!blocksNavigation(url, cur.bases)) { void route.fallback(); return; }
+    if (cur.blocked.length < 200) cur.blocked.push(`navigation ${url.slice(0, 200)}`);
+    log(`[browser] ${cur.job.id}: 広告のページ遷移を止めました (${url.slice(0, 120)})`);
+    void route.abort('aborted');
   }
 
   private async runDriver(cur: Current): Promise<void> {
@@ -424,6 +615,8 @@ export class BrowserEngine {
         this.banner(page, '自動操作中: ありがとうございます、続きは自動です', 'auto');
       },
       downloadDetected: () => cur.downloadSeen,
+      popupCount: () => cur.popups,
+      focus: () => { page.bringToFront().catch(() => { /* ignore */ }); },
       log: (m) => log(`[browser] ${job.id}: ${m}`),
     };
 

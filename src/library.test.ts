@@ -3,24 +3,102 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import { Db } from './db.js';
-import { decideItem, diagnoseItems, missingVolumes } from './library.js';
+import { decideItems, missingVolumes, type ItemInput } from './library.js';
+import type { PinaxConfig } from './pinax.js';
 import type { Job } from './types.js';
-import { seriesKeyOf } from './volume.js';
+import { parseItem, seriesKeyOf } from './volume.js';
 
-/** 台帳はユーザー単位なので、持ち主を 1 人用意してから始める */
 function tmpDb(): Db {
   const db = new Db(fs.mkdtempSync(path.join(os.tmpdir(), 'pd-lib-')));
   db.createUser('seamo', null);
+  db.createUser('もう一人', null);
   return db;
 }
 
 const USER = 1;
+const OTHER = 2;
 const KEY = seriesKeyOf('作品名');
 
-/** 台帳に 1 件積む短縮形 */
-function own(db: Db, from: number, to: number, status: 'have' | 'done' = 'have', userId = USER) {
-  return db.insertItem({ userId, seriesKey: KEY, volumeFrom: from, volumeTo: to, status, title: '作品名' });
+/**
+ * 棚 (pinax) の代わり。`POST /api/own` に、持っている巻から答えを作って返す。
+ *
+ * 読み方を本物と揃えるために `parseItem` を通している — pinax 側の `seriesKeyOf` は
+ * ここからの移植で、**同じ文字列から同じキーが出ることが前提**。ここを別物にすると、
+ * テストは通るのに本番で噛み合わない。
+ */
+async function fakeShelf(
+  shelf: Record<string, { from: number; to: number }[]>,
+  opts: { broken?: boolean } = {}
+): Promise<{ cfg: PinaxConfig; calls: number[]; close: () => Promise<void> }> {
+  const calls: number[] = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const items = (JSON.parse(body).items ?? []) as ItemInput['meta'][];
+      calls.push(items.length);
+      if (opts.broken) {
+        res.writeHead(500).end('棚が転んでいます');
+        return;
+      }
+      const answers = items.map((q) => {
+        const parsed = parseItem({ title: q?.title ?? null, volume: q?.volume ?? null, rawText: q?.rawText ?? null });
+        const have = shelf[parsed.seriesKey] ?? [];
+        if (parsed.volumeFrom === null || parsed.volumeTo === null || have.length === 0) {
+          return { parsed, owned: false, missing: null, series: [], reason: '蔵書にこの作品がありません' };
+        }
+        const missing = missingVolumes({ from: parsed.volumeFrom, to: parsed.volumeTo }, have);
+        return {
+          parsed,
+          owned: missing.length === 0,
+          missing,
+          series: [],
+          reason: missing.length === 0 ? '所持済み (棚にあります)' : `未所持: ${missing.join(',')}`,
+        };
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ answers }));
+    });
+  });
+  await new Promise<void>((ok) => server.listen(0, '127.0.0.1', () => ok()));
+  const port = (server.address() as { port: number }).port;
+  return {
+    cfg: { baseUrl: `http://127.0.0.1:${port}`, token: '', timeoutMs: 2000 },
+    calls,
+    close: () => new Promise<void>((ok) => server.close(() => ok())),
+  };
+}
+
+/** 投入 1 件分の短縮形 */
+const item = (meta: ItemInput['meta']): ItemInput => ({ urls: ['https://a/x'], meta });
+
+/** 手元のジョブを 1 件積む */
+function putJob(db: Db, over: Partial<Job> = {}): Job {
+  const ts = new Date().toISOString();
+  const job: Job = {
+    id: Math.random().toString(36).slice(2, 10),
+    userId: USER,
+    url: 'https://a/x',
+    destDir: 'd',
+    engine: null,
+    status: 'downloading',
+    filename: null,
+    bytesTotal: 0,
+    bytesDone: 0,
+    speed: 0,
+    error: null,
+    externalId: null,
+    seriesKey: KEY,
+    volumeFrom: 3,
+    volumeTo: 3,
+    meta: {},
+    createdAt: ts,
+    updatedAt: ts,
+    ...over,
+  };
+  db.insertJob(job);
+  return job;
 }
 
 test('missingVolumes: 覆えていれば空、残れば未取得の巻を返す', () => {
@@ -32,187 +110,154 @@ test('missingVolumes: 覆えていれば空、残れば未取得の巻を返す'
   assert.deepEqual(missingVolumes({ from: 1, to: 8 }, [{ from: 1, to: 6 }, { from: 4, to: 8 }]), []);
 });
 
-test('台帳が空なら落とす', () => {
-  const db = tmpDb();
-  const d = decideItem(db, USER, { urls: ['https://a/1'], meta: { title: '作品名', volume: '3' } });
+test('棚に無ければ落とす', async () => {
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [item({ title: '作品名', volume: '3' })]);
   assert.equal(d.kind, 'new');
+  await shelf.close();
 });
 
-test('1-6巻を持っている状態で第3巻が来たらスキップ', () => {
-  const db = tmpDb();
-  own(db, 1, 6);
-  const d = decideItem(db, USER, { urls: ['https://b/3'], meta: { title: '作品名 第3巻' } });
+test('棚が 1-6巻 を持っていて第3巻が来たらスキップ', async () => {
+  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] });
+  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [item({ title: '作品名 第3巻' })]);
   assert.equal(d.kind, 'skip');
-  if (d.kind === 'skip') assert.match(d.reason, /所持済み/);
+  await shelf.close();
 });
 
-test('1-6巻を持っている状態で4-8巻が来たら、未所持が残るので落とす', () => {
-  const db = tmpDb();
-  own(db, 1, 6);
-  const d = decideItem(db, USER, { urls: ['https://b/4-8'], meta: { title: '作品名 4-8巻' } });
+test('棚が 1-6巻 を持っていて 4-8巻 が来たら、未所持が残るので落とす', async () => {
+  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] });
+  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [item({ title: '作品名 第4-8巻' })]);
   assert.equal(d.kind, 'new');
-  if (d.kind === 'new') assert.deepEqual(d.missing, [7, 8]);
+  assert.deepEqual(d.kind === 'new' ? d.missing : null, [7, 8]);
+  await shelf.close();
 });
 
-test('重ならない巻は落とす', () => {
-  const db = tmpDb();
-  own(db, 1, 6);
-  const d = decideItem(db, USER, { urls: ['https://b/7'], meta: { title: '作品名 第7巻' } });
+test('別の作品は干渉しない', async () => {
+  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] });
+  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [item({ title: '別作品 第3巻' })]);
+  assert.equal(d.kind, 'new');
+  await shelf.close();
+});
+
+/**
+ * ここが逆に倒れると、棚が落ちている間の投入が全部「持っている」ことになり、
+ * その巻は二度と落ちてこない。もう一度落ちる方が被害が小さい。
+ */
+test('棚が答えられなければ落とす', async () => {
+  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] }, { broken: true });
+  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [item({ title: '作品名 第3巻' })]);
+  assert.equal(d.kind, 'new');
+  await shelf.close();
+});
+
+test('棚が止まっていても投入そのものは通る', async () => {
+  const dead: PinaxConfig = { baseUrl: 'http://127.0.0.1:1', token: '', timeoutMs: 300 };
+  const [d] = await decideItems(tmpDb(), dead, USER, [item({ title: '作品名 第3巻' })]);
   assert.equal(d.kind, 'new');
 });
 
-test('未完のジョブがあれば合流させる (別サイトの同じ巻)', () => {
+test('棚が未設定なら聞かずに落とす', async () => {
+  const off: PinaxConfig = { baseUrl: '', token: '', timeoutMs: 300 };
+  const [d] = await decideItems(tmpDb(), off, USER, [item({ title: '作品名 第3巻' })]);
+  assert.equal(d.kind, 'new');
+});
+
+test('巻数を読めないものは棚に聞かずに落とす', async () => {
+  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] });
+  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [item({ rawText: 'なんとか.rar' })]);
+  assert.equal(d.kind, 'new');
+  assert.equal(d.kind === 'new' ? d.missing : 'x', null);
+  assert.deepEqual(shelf.calls, [], '重なりを判定できないものを棚に聞いても仕方がない');
+  await shelf.close();
+});
+
+// ---- 棚を見ても分からないこと (落とし中・落とした直後) --------------------
+
+test('落としている最中のジョブがあれば合流させる (別サイトの同じ巻)', async () => {
   const db = tmpDb();
-  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: 3, volumeTo: 3, status: 'pending', jobId: 'job-1', title: '作品名' });
-  const d = decideItem(db, USER, { urls: ['https://b/3'], meta: { title: '作品名 第3巻' }, source: 'dryeyes:xxx' });
+  const job = putJob(db, { status: 'downloading' });
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(db, shelf.cfg, USER, [item({ title: '作品名 第3巻' })]);
   assert.equal(d.kind, 'merge');
-  if (d.kind === 'merge') assert.equal(d.jobId, 'job-1');
+  assert.equal(d.kind === 'merge' ? d.jobId : null, job.id);
+  assert.deepEqual(shelf.calls, [], '手元で決まるものを棚に聞きに行かない');
+  await shelf.close();
 });
 
-test('所持済みが優先される (未完ジョブがあっても、既に持っていれば落とさない)', () => {
+/**
+ * 落とし終わってから棚のスキャンが走るまでには間がある (既定 3 時間)。
+ * その隙間に同じ巻が別サイトから来ると、棚はまだ「持っていない」と答える。
+ */
+test('落とし終わったジョブは、棚がまだ知らなくても取得済みとして扱う', async () => {
   const db = tmpDb();
-  own(db, 1, 6, 'done');
-  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: 3, volumeTo: 3, status: 'pending', jobId: 'job-1', title: '作品名' });
-  const d = decideItem(db, USER, { urls: ['https://b/3'], meta: { title: '作品名 第3巻' } });
+  putJob(db, { status: 'done' });
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(db, shelf.cfg, USER, [item({ title: '作品名 第3巻' })]);
   assert.equal(d.kind, 'skip');
+  await shelf.close();
 });
 
-test('別シリーズは干渉しない', () => {
+test('失敗・中止のジョブは判定に参加しない (消さなくても落とし直せる)', async () => {
   const db = tmpDb();
-  own(db, 1, 6);
-  const d = decideItem(db, USER, { urls: ['https://b/3'], meta: { title: '別の作品 第3巻' } });
+  putJob(db, { status: 'failed' });
+  putJob(db, { status: 'canceled' });
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(db, shelf.cfg, USER, [item({ title: '作品名 第3巻' })]);
   assert.equal(d.kind, 'new');
+  await shelf.close();
 });
 
-test('巻数が読めなければ判定に参加せず落とす', () => {
+test('巻数を読めなかったジョブは重なり判定に出てこない', async () => {
   const db = tmpDb();
-  own(db, 1, 6);
-  const d = decideItem(db, USER, { urls: ['https://b/x'], meta: { rawText: '[著者] 作品名 読切' } });
+  putJob(db, { status: 'downloading', volumeFrom: null, volumeTo: null });
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(db, shelf.cfg, USER, [item({ title: '作品名 第3巻' })]);
   assert.equal(d.kind, 'new');
-  if (d.kind === 'new') assert.equal(d.missing, null);
+  await shelf.close();
 });
 
-test('巻数を読めなかった台帳レコードは重なり判定に出てこない', () => {
+/**
+ * 合流は自分のジョブの中だけで起きる。他人のダウンロード中ジョブに相乗りしても、
+ * 落ちる先はその人のフォルダで、こちらの手元には来ない。
+ */
+test('他人のジョブには合流しない', async () => {
   const db = tmpDb();
-  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: null, volumeTo: null, status: 'have', title: '作品名' });
-  const d = decideItem(db, USER, { urls: ['https://b/3'], meta: { title: '作品名 第3巻' } });
+  putJob(db, { status: 'downloading', userId: OTHER });
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(db, shelf.cfg, USER, [item({ title: '作品名 第3巻' })]);
   assert.equal(d.kind, 'new');
+  await shelf.close();
 });
 
-test('台帳はユーザーごとに分かれている (他人の所持は効かない)', () => {
-  const db = tmpDb();
-  db.createUser('もう一人', null);
-  // ユーザー 1 が 1-6 巻を持っていても、ユーザー 2 の投入は素通しになる。
-  // 保存先フォルダが別なので、片方の手元にあることは他方の手元の話にならない
-  own(db, 1, 6, 'have', 1);
+// ---- まとめて聞く ----------------------------------------------------------
 
-  assert.equal(decideItem(db, 1, { urls: ['https://a/3'], meta: { title: '作品名 第3巻' } }).kind, 'skip');
-  assert.equal(decideItem(db, 2, { urls: ['https://a/3'], meta: { title: '作品名 第3巻' } }).kind, 'new');
+test('棚への往復は投入の件数によらず 1 回', async () => {
+  const db = tmpDb();
+  putJob(db, { status: 'downloading', volumeFrom: 9, volumeTo: 9 });
+  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] });
+
+  const decisions = await decideItems(db, shelf.cfg, USER, [
+    item({ title: '作品名 第3巻' }),   // 棚が持っている
+    item({ title: '作品名 第7巻' }),   // 棚に無い
+    item({ title: '作品名 第9巻' }),   // 落とし中 (棚に聞かない)
+    item({ rawText: '読めない.rar' }), // 巻数不明 (棚に聞かない)
+  ]);
+
+  assert.deepEqual(decisions.map((d) => d.kind), ['skip', 'new', 'merge', 'new']);
+  assert.deepEqual(shelf.calls, [2], '手元で決まらなかった 2 件だけをまとめて聞く');
+  await shelf.close();
 });
 
-test('合流も自分の台帳の中だけで起きる', () => {
-  const db = tmpDb();
-  db.createUser('もう一人', null);
-  db.insertItem({
-    userId: 1, seriesKey: KEY, volumeFrom: 7, volumeTo: 7,
-    status: 'pending', jobId: 'job-1', title: '作品名',
+test('答えは投入と同じ並びで返る', async () => {
+  const shelf = await fakeShelf({
+    [seriesKeyOf('あ')]: [{ from: 1, to: 1 }],
+    [seriesKeyOf('う')]: [{ from: 1, to: 1 }],
   });
-
-  assert.equal(decideItem(db, 1, { urls: ['https://b/7'], meta: { title: '作品名 第7巻' } }).kind, 'merge');
-  // 別のユーザーの落としかけに相乗りすると、保存先が違うので手元に来ない
-  assert.equal(decideItem(db, 2, { urls: ['https://b/7'], meta: { title: '作品名 第7巻' } }).kind, 'new');
-});
-
-// ---- 管理画面向けの診断 ---------------------------------------------------
-// 台帳は「持っている」と言い切る場所なので、間違った行は黙ってその巻を落とせなくする。
-// 画面から直せるようにする前に、どれが怪しいのかを言えないと直しようがない。
-
-/** ジョブの引き当てだけを差し替える。ここで見たいのは台帳の側の見立て */
-const jobLookup = (jobs: Partial<Job>[]) => (id: string): Job | null =>
-  (jobs.find((j) => j.id === id) as Job | undefined) ?? null;
-
-test('診断: 何も問題の無い行には印が付かない', () => {
-  const db = tmpDb();
-  own(db, 1, 6, 'have');
-  const [d] = diagnoseItems(db.listItems({ userId: USER }), () => null);
-  assert.deepEqual(d.warnings, []);
-  assert.equal(d.job, null);
-});
-
-test('診断: pending のままジョブが消えた行を捕まえる', () => {
-  const db = tmpDb();
-  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: 7, volumeTo: 7, status: 'pending', jobId: 'gone', title: '作品名' });
-  const [d] = diagnoseItems(db.listItems({ userId: USER }), () => null);
-  // この行が残っている限り、同じ巻の投入は全部ここへ合流して何も落ちない
-  assert.equal(d.warnings.length, 1);
-  assert.match(d.warnings[0], /ジョブが残っていません/);
-});
-
-test('診断: 失敗で終わったジョブを指したままの行を捕まえる', () => {
-  const db = tmpDb();
-  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: 7, volumeTo: 7, status: 'pending', jobId: 'j1', title: '作品名' });
-  const [d] = diagnoseItems(
-    db.listItems({ userId: USER }),
-    jobLookup([{ id: 'j1', status: 'failed', filename: null, error: '全滅' }])
-  );
-  assert.match(d.warnings[0], /失敗で終わっています/);
-  assert.equal(d.job?.status, 'failed');
-});
-
-test('診断: 走っている最中のジョブは問題にしない', () => {
-  const db = tmpDb();
-  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: 7, volumeTo: 7, status: 'pending', jobId: 'j1', title: '作品名' });
-  const [d] = diagnoseItems(
-    db.listItems({ userId: USER }),
-    jobLookup([{ id: 'j1', status: 'downloading', filename: 'x.rar', error: null }])
-  );
-  assert.deepEqual(d.warnings, []);
-});
-
-test('診断: 作品名が無い行と巻数を読めていない行を捕まえる', () => {
-  const db = tmpDb();
-  // 作品名が分からないまま投入されると、キーが生の文字列 (ミラーのホスト名込み) から作られる
-  db.insertItem({ userId: USER, seriesKey: 'v0102rarkatfileturbobit', volumeFrom: 1, volumeTo: 2, status: 'done', title: null, rawText: 'v01-02.rar katfile turbobit' });
-  db.insertItem({ userId: USER, seriesKey: KEY, volumeFrom: null, volumeTo: null, status: 'have', title: '作品名' });
-
-  const found = diagnoseItems(db.listItems({ userId: USER }), () => null);
-  const noTitle = found.find((d) => d.title === null)!;
-  const noVolume = found.find((d) => d.volumeFrom === null)!;
-  assert.match(noTitle.warnings.join(), /別サイトから来た同じ巻と噛み合いません/);
-  assert.match(noVolume.warnings.join(), /重複の判定に参加していません/);
-});
-
-test('診断: ファイル名がそのまま作品名になっている行を捕まえる', () => {
-  const db = tmpDb();
-  // 作品名として入ってはいるが中身はファイル名。キーが落とすのは巻数だけなので、
-  // 拡張子もミラーのホスト名もキーに残り、他所から来た同じ巻と噛み合わない
-  db.insertItem({
-    userId: USER, seriesKey: 'x', volumeFrom: 1, volumeTo: 2, status: 'have',
-    title: 'Isekai machikoba muso v01-02s.rar katfile rapidgator',
-  });
-  const [d] = diagnoseItems(db.listItems({ userId: USER }), () => null);
-  assert.match(d.warnings.join(), /作品名にファイル名が入っています/);
-
-  // 普通の作品名は疑わない
-  const ok = tmpDb();
-  own(ok, 1, 1);
-  assert.deepEqual(diagnoseItems(ok.listItems({ userId: USER }), () => null)[0].warnings, []);
-});
-
-test('診断: 同じ巻を指す行が 2 つあれば両方に印が付く', () => {
-  const db = tmpDb();
-  const a = own(db, 1, 6);
-  const b = own(db, 3, 3);
-  const found = diagnoseItems(db.listItems({ userId: USER }), () => null);
-  assert.match(found.find((d) => d.id === a.id)!.warnings.join(), new RegExp(`id ${b.id}`));
-  assert.match(found.find((d) => d.id === b.id)!.warnings.join(), new RegExp(`id ${a.id}`));
-});
-
-test('診断: 他人の同じ巻は重複と見なさない (台帳はユーザー単位)', () => {
-  const db = tmpDb();
-  db.createUser('もう一人', null);
-  own(db, 1, 6, 'have', 1);
-  own(db, 1, 6, 'have', 2);
-  const found = diagnoseItems(db.listItems(), () => null);
-  assert.deepEqual(found.flatMap((d) => d.warnings), []);
+  const decisions = await decideItems(tmpDb(), shelf.cfg, USER, [
+    item({ title: 'あ 第1巻' }),
+    item({ title: 'い 第1巻' }),
+    item({ title: 'う 第1巻' }),
+  ]);
+  assert.deepEqual(decisions.map((d) => d.kind), ['skip', 'new', 'skip']);
+  await shelf.close();
 });

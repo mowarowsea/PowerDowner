@@ -11,11 +11,10 @@ import type { Aria2Engine } from './engines/aria2.js';
 import type { Jd2Engine } from './engines/jd2.js';
 import type { BrowserEngine } from './engines/browser.js';
 import { bus, log } from './events.js';
-import type { Job, EngineStatus, LibraryItem } from './types.js';
+import type { Job, EngineStatus } from './types.js';
 import { parseItem, seriesKeyOf } from './volume.js';
-import { isUsable, listContentFiles, scanFilenames } from './inventory.js';
-import { decideItem, diagnoseItems, type ItemInput } from './library.js';
-import type { CaptchaNotice } from './events.js';
+import { decideItems, type ItemInput } from './library.js';
+import type { CaptchaNotice, RejectedNotice } from './events.js';
 
 interface Deps {
   cfg: Config;
@@ -26,11 +25,27 @@ interface Deps {
   browser: BrowserEngine;
 }
 
+const HTTP_URL = /^https?:\/\//i;
+
 function normalizeDir(v: unknown): string | null {
   const s = String(v ?? '').trim();
   if (!s) return null;
   if (!path.isAbsolute(s)) throw new HttpError(400, 'フォルダは絶対パスで指定してください (例: D:\\Downloads)');
   return s;
+}
+
+/**
+ * URL の末尾から、巻数を読ませるためのファイル名らしき文字列を取り出す。
+ * ハッシュだけの URL では巻数を読めないが、それは「読めなかった」でよい
+ * (台帳に巻数 null で載り、リネームは落ちてきたファイル名から読み直す)。
+ */
+function fileNameOf(raw: string): string | null {
+  try {
+    const last = new URL(raw).pathname.split('/').filter(Boolean).pop() ?? '';
+    return decodeURIComponent(last) || null;
+  } catch {
+    return null;
+  }
 }
 
 function mask(t: string | null): string | null {
@@ -71,6 +86,7 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     users: db.listUsers(),
     jobs: db.listJobs({ limit: 300 }),
     engines: [aria2.status(), jd2.status(), browser.status()],
+    hosters: db.listHosters(),
     settings: { civitaiToken: mask(db.getSetting('civitai_token')) },
   });
 
@@ -144,8 +160,50 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     return { ok: true };
   });
 
+  // ---- hosters (アップローダの台帳) ---------------------------------------
+  // 「使用しない」に倒したアップローダは投入されてもジョブにしない。サイトが仕様変更で
+  // 通らなくなった時、コードを直さずここを倒すだけで運用を続けられるようにするのが狙い。
+
+  app.get('/api/hosters', async () => ({ hosters: db.listHosters() }));
+
+  app.patch<{ Params: { key: string }; Body: { enabled?: boolean; label?: string } }>(
+    '/api/hosters/:key',
+    async (req) => {
+      const cur = db.getHoster(req.params.key);
+      if (!cur) throw new HttpError(404, 'アップローダが見つかりません');
+      const patch: { enabled?: boolean; label?: string } = {};
+      if (typeof req.body?.enabled === 'boolean') patch.enabled = req.body.enabled;
+      if (typeof req.body?.label === 'string' && req.body.label.trim()) patch.label = req.body.label.trim();
+      const next = db.patchHoster(cur.key, patch);
+      if (patch.enabled !== undefined) {
+        log(`[hosters] ${next?.label}: ${patch.enabled ? '使用する' : '使用しない'}`);
+      }
+      return { hoster: next, hosters: db.listHosters() };
+    },
+  );
+
+  /** 優先度をひとつ上/下へ。並びは 0,1,2... に振り直して隙間を作らない */
+  app.post<{ Params: { key: string }; Body: { dir?: string } }>('/api/hosters/:key/move', async (req) => {
+    const order = db.listHosters();
+    const i = order.findIndex((h) => h.key === req.params.key);
+    if (i < 0) throw new HttpError(404, 'アップローダが見つかりません');
+    const j = req.body?.dir === 'up' ? i - 1 : i + 1;
+    if (j < 0 || j >= order.length) return { hosters: order };
+    [order[i], order[j]] = [order[j], order[i]];
+    db.renumberHosters(order.map((h) => h.key));
+    return { hosters: db.listHosters() };
+  });
+
   // ---- jobs -------------------------------------------------------------
-  app.post<{ Body: { userId?: number; urls?: string[] | string; destDir?: string | null; items?: ItemInput[] } }>('/api/jobs', async (req, reply) => {
+  app.post<{
+    Body: {
+      userId?: number;
+      urls?: string[] | string;
+      destDir?: string | null;
+      items?: ItemInput[];
+      item?: { title?: string | null; author?: string | null; volume?: string | null };
+    };
+  }>('/api/jobs', async (req, reply) => {
     const b = req.body ?? {};
     const userId = Number(b.userId);
     if (!Number.isInteger(userId)) throw new HttpError(400, 'ユーザーを選択してください');
@@ -157,15 +215,48 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     if (Array.isArray(b.items)) {
       requireToken(req);
       if (b.items.length === 0) throw new HttpError(400, 'items が空です');
-      const r = queue.addItems({ userId, destDir: b.destDir ?? null, items: b.items });
+      const r = await queue.addItems({ userId, destDir: b.destDir ?? null, items: b.items });
       reply.status(201);
       return r;
     }
 
     const urls = Array.isArray(b.urls) ? b.urls : String(b.urls ?? '').split(/\r?\n|\s+/);
+
+    // item 形式 = 画面から作品として登録する投入。DryEyes を通さずに作者・作品名を紐づける。
+    // 通る道は items (DryEyes) と同じにする — 台帳・リネーム・ミラーの扱いが 2 通りに割れると、
+    // どちらから入れたかで挙動が変わってしまう。
+    const title = String(b.item?.title ?? '').trim();
+    if (title) {
+      const author = String(b.item?.author ?? '').trim() || null;
+      const volume = String(b.item?.volume ?? '').trim();
+      const clean = urls.map((u) => String(u ?? '').trim()).filter((u) => HTTP_URL.test(u));
+      if (clean.length === 0) {
+        throw new HttpError(400, '有効な URL がありません (http/https で始まる行だけ受け付けます)');
+      }
+
+      // 巻数を書いたなら「その 1 ファイルの落とし先が複数ある」= ミラー。
+      // 書かなかったなら 1 行 1 巻として扱い、巻数は URL のファイル名から読む。
+      const items: ItemInput[] = volume
+        ? [{ urls: clean, source: 'manual', sourceKey: null, meta: { title, author, volume } }]
+        : clean.map((u) => ({
+            urls: [u],
+            source: 'manual',
+            sourceKey: null,
+            meta: { title, author, volume: null, rawText: fileNameOf(u) },
+          }));
+
+      const r = await queue.addItems({ userId, destDir: b.destDir ?? null, items });
+      reply.status(r.created.length > 0 ? 201 : 200);
+      return r;
+    }
+
     const r = queue.add({ userId, urls, destDir: b.destDir ?? null });
-    if (r.jobs.length === 0) throw new HttpError(400, '有効な URL がありません (http/https で始まる行だけ受け付けます)');
-    reply.status(201);
+    // 「使用しない」で弾いたのはエラーではない。画面に理由を出したいので 200 で返す —
+    // 400 にすると「有効な URL がありません」という的外れな文言になる
+    if (r.jobs.length === 0 && r.rejected.length === 0) {
+      throw new HttpError(400, '有効な URL がありません (http/https で始まる行だけ受け付けます)');
+    }
+    reply.status(r.jobs.length > 0 ? 201 : 200);
     return r;
   });
 
@@ -191,7 +282,7 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
   //
   // 台帳はユーザー単位なので、読み書きする口は必ずユーザーを受け取る。
 
-  /** 台帳を触る口のユーザー解決。存在しない ID を引き取らない */
+  /** ユーザーを受け取る口の解決。存在しない ID を引き取らない */
   const requireUser = (raw: unknown): number => {
     const id = Number(raw);
     if (!Number.isInteger(id)) throw new HttpError(400, 'ユーザーを選択してください');
@@ -200,173 +291,15 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
   };
 
   /**
-   * 台帳の一覧。管理画面がこれ 1 本で描けるよう、行そのものに加えて
-   * 「その行が指しているジョブの今」と「放っておくと困る点」を添えて返す。
-   */
-  app.get<{ Querystring: { series?: string; userId?: string; limit?: string } }>('/api/items', async (req) => {
-    const limit = Number(req.query.limit);
-    const items = db.listItems({
-      seriesKey: req.query.series,
-      userId: req.query.userId === undefined ? undefined : requireUser(req.query.userId),
-      limit: Number.isInteger(limit) && limit > 0 ? Math.min(limit, 5000) : undefined,
-    });
-    return { items: diagnoseItems(items, (id) => db.getJob(id)) };
-  });
-
-  /**
-   * 台帳 1 行を直す。管理画面からの手直し専用。
-   *
-   * 作品名を変えたら **series_key も導き直す**。ここを揃えないと、名前だけ直って
-   * 別作品のままになり、直したつもりで何も変わらない。
-   */
-  app.patch<{ Params: { id: string }; Body: { title?: string; author?: string | null; volumes?: string } }>(
-    '/api/items/:id',
-    async (req) => {
-      const id = Number(req.params.id);
-      const cur = Number.isInteger(id) ? db.getItem(id) : null;
-      if (!cur) throw new HttpError(404, '台帳にありません');
-      const b = req.body ?? {};
-      const patch: { title?: string; author?: string | null; seriesKey?: string; volumeFrom?: number; volumeTo?: number } = {};
-
-      if (b.title !== undefined) {
-        const title = String(b.title).trim();
-        if (!title) throw new HttpError(400, '作品名は空にできません');
-        const key = seriesKeyOf(title);
-        if (!key) throw new HttpError(400, `作品名として使えません: ${title}`);
-        patch.title = title;
-        patch.seriesKey = key;
-      }
-      if (b.author !== undefined) patch.author = String(b.author ?? '').trim() || null;
-      if (b.volumes !== undefined) {
-        const raw = String(b.volumes).trim();
-        // 巻数だけを見る。読めないものを黙って通すと、重なり判定から静かに外れる
-        const parsed = parseItem({ volume: raw });
-        if (parsed.volumeFrom === null || parsed.volumeTo === null) {
-          throw new HttpError(400, `巻数として読めません: ${raw} (例: 3 または 1-7)`);
-        }
-        patch.volumeFrom = parsed.volumeFrom;
-        patch.volumeTo = parsed.volumeTo;
-      }
-      if (Object.keys(patch).length === 0) throw new HttpError(400, '直す項目がありません');
-
-      return { item: db.patchItem(id, patch) };
-    }
-  );
-
-  /**
-   * 同じキーの行をまとめて付け替える。
-   * 作品名の分からないまま投入されて、生の文字列からキーが作られた行を救うための口 —
-   * 1 行ずつ直すと、直した分から新しいキーへ移ってしまい、かえって散らばる。
-   */
-  app.post<{ Body: { userId?: number; seriesKey?: string; title?: string; author?: string | null } }>(
-    '/api/items/relabel',
-    async (req) => {
-      const b = req.body ?? {};
-      const userId = requireUser(b.userId);
-      const seriesKey = String(b.seriesKey ?? '');
-      if (!seriesKey) throw new HttpError(400, '直す対象がありません');
-      const title = String(b.title ?? '').trim();
-      if (!title) throw new HttpError(400, '作品名を入力してください');
-      const nextKey = seriesKeyOf(title);
-      if (!nextKey) throw new HttpError(400, `作品名として使えません: ${title}`);
-
-      const changed = db.relabelSeries(userId, seriesKey, {
-        seriesKey: nextKey,
-        title,
-        author: String(b.author ?? '').trim() || null,
-      });
-      if (changed === 0) throw new HttpError(404, '対象の行がありません');
-      return { changed, seriesKey: nextKey };
-    }
-  );
-
-  /** まとめて消す。1 作品ぶんを片付けるのに 1 行ずつ叩かせない */
-  app.post<{ Body: { ids?: number[] } }>('/api/items/delete', async (req) => {
-    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter((n) => Number.isInteger(n));
-    if (ids.length === 0) throw new HttpError(400, '消す行がありません');
-    return { deleted: db.deleteItems(ids) };
-  });
-
-  app.post<{
-    Body: {
-      userId?: number;
-      title?: string; author?: string | null; volumes?: string;
-      items?: {
-        title?: string; author?: string | null; volumes?: string | number | null;
-        /** 投入元が結果を突き合わせるための目印。そのまま返す */
-        sourceKey?: string | null;
-      }[];
-    };
-  }>('/api/items', async (req, reply) => {
-    const b = req.body ?? {};
-
-    // items 形式 = DryEyes が「これは既に持っている」とまとめて登録してくる形。
-    // 1 件ずつ巻数が違うので、title + volumes の単数形では表せない
-    if (Array.isArray(b.items)) {
-      requireToken(req);
-      const userId = requireUser(b.userId);
-      // 登録した台帳 ID を投入元へ返す。あとで「やっぱり持っていなかった」と
-      // 取り消すには、どの行がどのレコードになったかが分かる必要がある
-      const created: (LibraryItem & { sourceKey: string | null })[] = [];
-      let skipped = 0;
-      for (const entry of b.items) {
-        const parsed = parseItem({ title: entry.title ?? null, volume: entry.volumes ?? null });
-        // 巻数を読めないものは重なり判定に参加できないので、登録しても意味がない
-        if (parsed.volumeFrom === null || parsed.volumeTo === null || !parsed.seriesKey) {
-          skipped++;
-          continue;
-        }
-        if (db.findOverlappingItems(userId, parsed.seriesKey, parsed.volumeFrom, parsed.volumeTo).length > 0) {
-          skipped++;
-          continue;
-        }
-        created.push({
-          ...db.insertItem({
-            userId,
-            seriesKey: parsed.seriesKey,
-            volumeFrom: parsed.volumeFrom,
-            volumeTo: parsed.volumeTo,
-            status: 'have',
-            title: entry.title ?? null,
-            author: entry.author ?? null,
-          }),
-          sourceKey: entry.sourceKey ?? null,
-        });
-      }
-      reply.status(201);
-      return { created, skipped };
-    }
-
-    const userId = requireUser(b.userId);
-    const title = String(b.title ?? '').trim();
-    if (!title) throw new HttpError(400, '作品名を入力してください');
-    const volumes = String(b.volumes ?? '').trim();
-    if (!volumes) throw new HttpError(400, '巻数を入力してください (例: 3 または 1-7)');
-
-    const parsed = parseItem({ title, volume: volumes });
-    if (parsed.volumeFrom === null || parsed.volumeTo === null) {
-      throw new HttpError(400, `巻数として読めません: ${volumes} (例: 3 または 1-7)`);
-    }
-
-    // 範囲は 1 巻ずつに展開する。歯抜け (紙で買った巻、落とせなかった巻) が普通に起きるので、
-    // 後から 1 件だけ消せる形にしておく
-    const created: LibraryItem[] = [];
-    let skipped = 0;
-    for (let v = parsed.volumeFrom; v <= parsed.volumeTo; v++) {
-      if (db.findOverlappingItems(userId, parsed.seriesKey, v, v).length > 0) { skipped++; continue; }
-      created.push(db.insertItem({
-        userId, seriesKey: parsed.seriesKey, volumeFrom: v, volumeTo: v,
-        status: 'have', title, author: b.author ?? null,
-      }));
-    }
-    reply.status(201);
-    return { created, skipped };
-  });
-
-  /**
    * 投入せずに「もう持っているか」だけを調べる。
    * DryEyes が候補を見せる前に、取得済みのものへ印を付けるために使う。
-   * 台帳の中身が分かるので、投入と同じくトークンを要求する。
+   *
+   * **答えを持っているのは pinax の棚**で、PowerDowner は取得済みの台帳を持たない
+   * (docs/ROADMAP.md 2.5)。口の形を変えていないのは、聞く側から見れば
+   * 聞くことも答えも変わらないため。userId が要るのは「落としている最中か」の
+   * 判定がユーザーごとのジョブを見るからで、棚そのものはユーザーで分かれていない。
+   *
+   * 棚の中身が分かるので、投入と同じくトークンを要求する。
    */
   app.post<{ Body: { userId?: number; items?: ItemInput[] } }>('/api/items/check', async (req) => {
     requireToken(req);
@@ -374,71 +307,22 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     if (items.length === 0) throw new HttpError(400, 'items が空です');
 
+    // 投入と同じ判定をそのまま通す。別の道で判定すると、画面に出ている印と
+    // 実際に投入した時の結果がずれる。何も書き換えない
+    const decisions = await decideItems(db, cfg.pinax, userId, items);
     return {
-      results: items.map((item) => {
-        // decideItem は台帳を読むだけで、何も書き換えない
-        const decision = decideItem(db, userId, item);
-        return {
-          sourceKey: item.sourceKey ?? null,
-          state: decision.kind,
-          reason:
-            decision.kind === 'skip' ? decision.reason
-            : decision.kind === 'merge' ? 'ダウンロード中のものがあります'
-            : null,
-          seriesKey: decision.parsed.seriesKey,
-          volumeFrom: decision.parsed.volumeFrom,
-          volumeTo: decision.parsed.volumeTo,
-        };
-      }),
+      results: decisions.map((decision, index) => ({
+        sourceKey: items[index].sourceKey ?? null,
+        state: decision.kind,
+        reason:
+          decision.kind === 'skip' ? decision.reason
+          : decision.kind === 'merge' ? 'ダウンロード中のものがあります'
+          : null,
+        seriesKey: decision.parsed.seriesKey,
+        volumeFrom: decision.parsed.volumeFrom,
+        volumeTo: decision.parsed.volumeTo,
+      })),
     };
-  });
-
-  // 所持登録の取り消し。UI からの操作でもあるので、他の画面向けの口と同じく素通しにする
-  // (投入と違い、これ自体は台帳の中身を外へ出さない)
-  app.delete<{ Params: { id: string } }>('/api/items/:id', async (req) => {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || !db.deleteItem(id)) throw new HttpError(404, '台帳にありません');
-    return { ok: true };
-  });
-
-  /**
-   * 手元のファイルから所持済みを起こす。
-   * 既定は候補を返すだけで、commit を立てて初めて台帳に入る —
-   * ファイル名のパースは外れることがあるので、目で見てから確定させる。
-   */
-  app.post<{ Body: { userId?: number; dir?: string; commit?: boolean } }>('/api/items/scan', async (req) => {
-    const dirs = cfg.library.scanDirs.map((d) => path.resolve(d));
-    if (dirs.length === 0) {
-      throw new HttpError(400, 'config.json の library.scanDirs が空です。スキャンするフォルダを登録してください');
-    }
-    const target = path.resolve(String(req.body?.dir ?? dirs[0]));
-    // 任意のパスを読ませないため、設定に載せたフォルダだけを対象にする
-    if (!dirs.includes(target)) throw new HttpError(400, `library.scanDirs に無いフォルダです: ${target}`);
-
-    let names: string[];
-    try {
-      names = await listContentFiles(target, { recursive: cfg.library.scanRecursive });
-    } catch (e) {
-      throw new HttpError(400, `フォルダを読めません: ${target} (${(e as Error).message})`);
-    }
-    const candidates = scanFilenames(names);
-    // 台帳に入れる段になって初めてユーザーが要る。見るだけなら誰のものでもない
-    if (!req.body?.commit) return { dir: target, candidates, committed: false };
-    const userId = requireUser(req.body?.userId);
-
-    const created: LibraryItem[] = [];
-    let skipped = 0;
-    for (const c of candidates) {
-      if (!isUsable(c) || db.findOverlappingItems(userId, c.seriesKey, c.volumeFrom!, c.volumeTo!).length > 0) {
-        skipped++;
-        continue;
-      }
-      created.push(db.insertItem({
-        userId, seriesKey: c.seriesKey, volumeFrom: c.volumeFrom, volumeTo: c.volumeTo,
-        status: 'have', title: c.title,
-      }));
-    }
-    return { dir: target, candidates, committed: true, created, skipped };
   });
 
   // ---- settings ---------------------------------------------------------
@@ -458,17 +342,20 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     const onRemoved = (id: string) => send('jobRemoved', { id });
     const onEngine = (status: EngineStatus) => send('engine', { status });
     const onCaptcha = (notice: CaptchaNotice) => send('captcha', { notice });
+    const onRejected = (notice: RejectedNotice) => send('rejected', { notice });
     const onLog = (line: string) => send('log', { line });
     bus.on('job', onJob);
     bus.on('jobRemoved', onRemoved);
     bus.on('engine', onEngine);
     bus.on('captcha', onCaptcha);
+    bus.on('rejected', onRejected);
     bus.on('log', onLog);
     socket.on('close', () => {
       bus.off('job', onJob);
       bus.off('jobRemoved', onRemoved);
       bus.off('engine', onEngine);
       bus.off('captcha', onCaptcha);
+      bus.off('rejected', onRejected);
       bus.off('log', onLog);
     });
   });

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { Job, JobPatch, User, JobStatus, Engine, LibraryItem, ItemStatus, MergeRecord } from './types.js';
+import type { Job, JobPatch, User, JobStatus, Engine, Hoster, HosterDef } from './types.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -22,48 +22,47 @@ CREATE TABLE IF NOT EXISTS jobs (
   speed INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   external_id TEXT,
+  -- 投入時に読んだ「どの作品の何巻か」。**取得済みの台帳はもう持たない** ので、
+  -- 「同じ巻が別サイトから来た」「落としたばかりでまだ棚に無い」の判定はここでやる。
+  -- 手元に何があるかは pinax が棚を見て答える (docs/ROADMAP.md 2.5)。
+  series_key TEXT,
+  volume_from INTEGER,
+  volume_to INTEGER,
   meta TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jobs_user_idx ON jobs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs(status);
+-- jobs_series_idx は migrateItemsToJobs が張る。**ここに書いてはいけない** —
+-- SCHEMA は series_key をまだ持たない古い DB にも流れるので、no such column で起動できなくなる
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
--- 取得済みアイテムの台帳。別サイトの監視から同じ巻が来た時に「もう持っている」と
--- 判断するために使う。job_id をあえて外部キーにしていないのは、ジョブを消しても
--- 所持情報を残すため (docs/ROADMAP.md 2 章)。
---
--- 台帳はユーザー単位。保存先フォルダがユーザーごとに分かれている以上、
--- 「持っている」もユーザーごとにしか成り立たない — 共有にすると、先に誰かが落とした
--- 時点で 2 人目の手元には何も残らないまま弾かれる。
-CREATE TABLE IF NOT EXISTS items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  series_key TEXT NOT NULL,
-  volume_from INTEGER,
-  volume_to INTEGER,
-  status TEXT NOT NULL,
-  title TEXT,
-  author TEXT,
-  job_id TEXT,
-  source TEXT,
-  raw_text TEXT,
-  merged_from TEXT NOT NULL DEFAULT '[]',
+-- アップローダ (ホスター) の台帳。1 行 = 1 業者で、別名ドメインは domains にまとめる。
+-- ユーザー単位にしないのは、サイトが CAPTCHA を出すかどうかが誰のジョブかに依らないため。
+CREATE TABLE IF NOT EXISTS hosters (
+  key TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  domains TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 0,
+  ok_count INTEGER NOT NULL DEFAULT 0,
+  fail_count INTEGER NOT NULL DEFAULT 0,
+  human_count INTEGER NOT NULL DEFAULT 0,
+  last_ok_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS items_series_idx ON items(user_id, series_key, volume_from, volume_to);
-CREATE INDEX IF NOT EXISTS items_job_idx ON items(job_id);
 `;
 
 type UserRow = { id: number; name: string; default_dir: string | null; created_at: string };
 type JobRow = {
   id: string; user_id: number; url: string; dest_dir: string; engine: string | null; status: string;
   filename: string | null; bytes_total: number; bytes_done: number; speed: number; error: string | null;
-  external_id: string | null; meta: string; created_at: string; updated_at: string;
+  external_id: string | null; series_key: string | null; volume_from: number | null; volume_to: number | null;
+  meta: string; created_at: string; updated_at: string;
 };
 
 function rowToUser(r: UserRow): User {
@@ -84,6 +83,9 @@ function rowToJob(r: JobRow): Job {
     speed: Number(r.speed),
     error: r.error,
     externalId: r.external_id,
+    seriesKey: r.series_key,
+    volumeFrom: r.volume_from === null ? null : Number(r.volume_from),
+    volumeTo: r.volume_to === null ? null : Number(r.volume_to),
     meta: safeJson(r.meta),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -94,33 +96,28 @@ function safeJson(s: string): Record<string, unknown> {
   try { return JSON.parse(s) ?? {}; } catch { return {}; }
 }
 
-type ItemRow = {
-  id: number; series_key: string; volume_from: number | null; volume_to: number | null;
-  user_id: number;
-  status: string; title: string | null; author: string | null; job_id: string | null;
-  source: string | null; raw_text: string | null; merged_from: string;
+type HosterRow = {
+  key: string; label: string; domains: string; enabled: number; priority: number;
+  ok_count: number; fail_count: number; human_count: number; last_ok_at: string | null;
   created_at: string; updated_at: string;
 };
 
-function rowToItem(r: ItemRow): LibraryItem {
-  let merged: MergeRecord[] = [];
+function rowToHoster(r: HosterRow): Hoster {
+  let domains: string[] = [];
   try {
-    const parsed = JSON.parse(r.merged_from);
-    if (Array.isArray(parsed)) merged = parsed as MergeRecord[];
-  } catch { merged = []; }
+    const parsed = JSON.parse(r.domains);
+    if (Array.isArray(parsed)) domains = parsed.map(String);
+  } catch { domains = []; }
   return {
-    id: r.id,
-    userId: Number(r.user_id),
-    seriesKey: r.series_key,
-    volumeFrom: r.volume_from === null ? null : Number(r.volume_from),
-    volumeTo: r.volume_to === null ? null : Number(r.volume_to),
-    status: r.status as ItemStatus,
-    title: r.title,
-    author: r.author,
-    jobId: r.job_id,
-    source: r.source,
-    rawText: r.raw_text,
-    mergedFrom: merged,
+    key: r.key,
+    label: r.label,
+    domains,
+    enabled: r.enabled !== 0,
+    priority: Number(r.priority),
+    okCount: Number(r.ok_count),
+    failCount: Number(r.fail_count),
+    humanCount: Number(r.human_count),
+    lastOkAt: r.last_ok_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -136,72 +133,53 @@ export class Db {
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
-    this.migrateItemsToPerUser();
+    this.migrateItemsToJobs();
   }
 
   /**
-   * 台帳をユーザー単位にする前の DB を引き上げる。
+   * 取得済みの台帳 (items) を捨てて、巻の判定を jobs に移した時の引き上げ。
    *
-   * 既存行の持ち主は、ジョブが残っていればそのジョブのユーザー。
-   * 手で登録した所持記録 (job_id が無い) は手がかりが無いので最初のユーザーに寄せる —
-   * 共有台帳だった頃は実質 1 人で使っていたはずで、間違えても「もう一度落ちる」だけ。
+   * **台帳が持っていた「もう持っている」は pinax が棚を見て答える。** 台帳は
+   * ダウンロードの記録であって棚の姿ではないので、手で置いたもの・落とす前から
+   * 持っていたもの・消したものが映らなかった (docs/ROADMAP.md 2.5)。
    *
-   * ALTER TABLE では NOT NULL の列を後から足せないので作り直す。
+   * ただし台帳には所持以外にもう 1 つ仕事があった — 「今落としている最中の巻」の
+   * 見張りで、**これは棚を見ても分からない** (まだファイルが無い)。そちらは
+   * jobs の列へ引き継ぐ。捨てる前に、ジョブに結び付いていた行から巻の解釈を移す。
    */
-  private migrateItemsToPerUser(): void {
-    const cols = this.db.prepare('PRAGMA table_info(items)').all() as { name: string }[];
-    if (cols.length === 0 || cols.some((c) => c.name === 'user_id')) return;
-
-    const before = (this.db.prepare('SELECT COUNT(*) AS n FROM items').get() as { n: number }).n;
-
-    // 作り直しの間だけ外部キーを外す。引き継ぐ行は既に検証済みで、
-    // 次の起動で PRAGMA foreign_keys = ON の下を通る
-    this.db.exec('PRAGMA foreign_keys = OFF;');
-    try {
-      this.db.exec(`
-        BEGIN;
-        CREATE TABLE items_migrating (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          user_id INTEGER NOT NULL REFERENCES users(id),
-          series_key TEXT NOT NULL,
-          volume_from INTEGER,
-          volume_to INTEGER,
-          status TEXT NOT NULL,
-          title TEXT,
-          author TEXT,
-          job_id TEXT,
-          source TEXT,
-          raw_text TEXT,
-          merged_from TEXT NOT NULL DEFAULT '[]',
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        INSERT INTO items_migrating
-          (id, user_id, series_key, volume_from, volume_to, status, title, author, job_id, source, raw_text, merged_from, created_at, updated_at)
-        SELECT i.id, COALESCE(j.user_id, (SELECT MIN(id) FROM users)),
-               i.series_key, i.volume_from, i.volume_to, i.status, i.title, i.author,
-               i.job_id, i.source, i.raw_text, i.merged_from, i.created_at, i.updated_at
-          FROM items i LEFT JOIN jobs j ON j.id = i.job_id
-         WHERE COALESCE(j.user_id, (SELECT MIN(id) FROM users)) IS NOT NULL;
-        DROP TABLE items;
-        ALTER TABLE items_migrating RENAME TO items;
-        COMMIT;
-      `);
-    } catch (e) {
-      this.db.exec('ROLLBACK;');
-      throw e;
-    } finally {
-      this.db.exec('PRAGMA foreign_keys = ON;');
+  private migrateItemsToJobs(): void {
+    const jobCols = this.db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[];
+    if (!jobCols.some((c) => c.name === 'series_key')) {
+      this.db.exec(
+        'ALTER TABLE jobs ADD COLUMN series_key TEXT;' +
+        'ALTER TABLE jobs ADD COLUMN volume_from INTEGER;' +
+        'ALTER TABLE jobs ADD COLUMN volume_to INTEGER;'
+      );
+      if (this.hasTable('items')) {
+        // 台帳の解釈をそのまま移す。ここを飛ばすと、落とし中のジョブが判定から
+        // 外れて、同じ巻が別サイトから来た時に二重に落ちる
+        const moved = this.db.prepare(
+          `UPDATE jobs SET
+              series_key  = (SELECT i.series_key  FROM items i WHERE i.job_id = jobs.id ORDER BY i.id LIMIT 1),
+              volume_from = (SELECT i.volume_from FROM items i WHERE i.job_id = jobs.id ORDER BY i.id LIMIT 1),
+              volume_to   = (SELECT i.volume_to   FROM items i WHERE i.job_id = jobs.id ORDER BY i.id LIMIT 1)
+            WHERE EXISTS (SELECT 1 FROM items i WHERE i.job_id = jobs.id)`
+        ).run();
+        console.log(`[db] 巻の判定を台帳から jobs へ移しました (${Number(moved.changes)} 件)`);
+      }
     }
-    // テーブルごと消えた索引を張り直す
-    this.db.exec(SCHEMA);
+    // 列が揃ってから張る (新しい DB では SCHEMA が列を作り、ここで索引が付く)
+    this.db.exec('CREATE INDEX IF NOT EXISTS jobs_series_idx ON jobs(user_id, series_key, volume_from, volume_to);');
 
-    const after = (this.db.prepare('SELECT COUNT(*) AS n FROM items').get() as { n: number }).n;
-    const lost = before - after;
-    console.log(
-      `[db] 台帳をユーザー単位に移行しました (${after} 件)` +
-        (lost > 0 ? ` — ユーザーのいない ${lost} 件は引き継げませんでした` : '')
-    );
+    if (this.hasTable('items')) {
+      const n = (this.db.prepare('SELECT COUNT(*) AS n FROM items').get() as { n: number }).n;
+      this.db.exec('DROP TABLE items;');
+      console.log(`[db] 取得済みの台帳 (items ${n} 件) を捨てました — 所持は pinax の棚に聞きます`);
+    }
+  }
+
+  private hasTable(name: string): boolean {
+    return this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name) !== undefined;
   }
 
   // ---- users -------------------------------------------------------------
@@ -261,10 +239,12 @@ export class Db {
 
   insertJob(job: Job): void {
     this.db.prepare(`INSERT INTO jobs
-      (id, user_id, url, dest_dir, engine, status, filename, bytes_total, bytes_done, speed, error, external_id, meta, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      (id, user_id, url, dest_dir, engine, status, filename, bytes_total, bytes_done, speed, error, external_id,
+       series_key, volume_from, volume_to, meta, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(job.id, job.userId, job.url, job.destDir, job.engine, job.status, job.filename, job.bytesTotal,
-        job.bytesDone, job.speed, job.error, job.externalId, JSON.stringify(job.meta), job.createdAt, job.updatedAt);
+        job.bytesDone, job.speed, job.error, job.externalId,
+        job.seriesKey, job.volumeFrom, job.volumeTo, JSON.stringify(job.meta), job.createdAt, job.updatedAt);
   }
 
   patchJob(id: string, patch: JobPatch): Job | null {
@@ -272,9 +252,10 @@ export class Db {
     if (!cur) return null;
     const next: Job = { ...cur, ...patch, meta: { ...cur.meta, ...(patch.meta ?? {}) }, updatedAt: now() };
     this.db.prepare(`UPDATE jobs SET user_id=?, url=?, dest_dir=?, engine=?, status=?, filename=?, bytes_total=?,
-      bytes_done=?, speed=?, error=?, external_id=?, meta=?, updated_at=? WHERE id=?`)
+      bytes_done=?, speed=?, error=?, external_id=?, series_key=?, volume_from=?, volume_to=?, meta=?, updated_at=? WHERE id=?`)
       .run(next.userId, next.url, next.destDir, next.engine, next.status, next.filename, next.bytesTotal,
-        next.bytesDone, next.speed, next.error, next.externalId, JSON.stringify(next.meta), next.updatedAt, id);
+        next.bytesDone, next.speed, next.error, next.externalId,
+        next.seriesKey, next.volumeFrom, next.volumeTo, JSON.stringify(next.meta), next.updatedAt, id);
     return next;
   }
 
@@ -282,130 +263,107 @@ export class Db {
     return this.db.prepare('DELETE FROM jobs WHERE id = ?').run(id).changes > 0;
   }
 
-  // ---- library (取得済みアイテムの台帳) -----------------------------------
-
   /**
-   * 巻数の範囲が重なる既存アイテムを返す。
-   * 「1-6 巻を持っている状態で 3 巻が来た」を捕まえるのがこのクエリ。
-   * 巻数を読めなかったアイテム (volume_from IS NULL) は判定に参加しない。
+   * 同じ巻を指す既存のジョブを返す。**台帳の代わりにここを見る。**
+   *
+   * 見るのは「まだ落としている最中」と「落とし終わった」だけで、失敗・中止は
+   * 参加させない — 落とし直せないと困るし、台帳の頃に踏んだ
+   * 「pending の行がジョブより長生きして、その巻の投入が全部吸い込まれる」壊れ方が
+   * これで構造から消える。**落とし直したい時はジョブを消せばよい。**
+   *
+   * 落とし終わったジョブも見るのは、**棚 (pinax) に載るまでに間がある**ため。
+   * スキャンは 3 時間おきなので、その間に同じ巻が別サイトから来ると二重に落ちる。
+   * 棚に載った後は pinax も同じ答えを返すので、二重に持っていても害は無い。
    */
-  findOverlappingItems(userId: number, seriesKey: string, from: number, to: number): LibraryItem[] {
+  findOverlappingJobs(userId: number, seriesKey: string, from: number, to: number): Job[] {
     const rows = this.db.prepare(
-      `SELECT * FROM items
+      `SELECT * FROM jobs
         WHERE user_id = ? AND series_key = ?
+          AND status NOT IN ('failed', 'canceled')
           AND volume_from IS NOT NULL AND volume_to IS NOT NULL
           AND volume_from <= ? AND volume_to >= ?
-        ORDER BY id`
+        ORDER BY created_at`
     ).all(userId, seriesKey, to, from);
-    return (rows as ItemRow[]).map(rowToItem);
+    return (rows as JobRow[]).map(rowToJob);
   }
 
-  getItem(id: number): LibraryItem | null {
-    const r = this.db.prepare('SELECT * FROM items WHERE id = ?').get(id) as ItemRow | undefined;
-    return r ? rowToItem(r) : null;
+  // ---- hosters (アップローダの台帳) ---------------------------------------
+
+  listHosters(): Hoster[] {
+    const rows = this.db.prepare('SELECT * FROM hosters ORDER BY priority ASC, key ASC').all() as HosterRow[];
+    return rows.map(rowToHoster);
   }
 
-  findItemByJob(jobId: string): LibraryItem | null {
-    const r = this.db.prepare('SELECT * FROM items WHERE job_id = ? ORDER BY id LIMIT 1').get(jobId) as ItemRow | undefined;
-    return r ? rowToItem(r) : null;
-  }
-
-  listItems(opts: { userId?: number; seriesKey?: string; limit?: number } = {}): LibraryItem[] {
-    const limit = opts.limit ?? 500;
-    const where: string[] = [];
-    const args: (string | number)[] = [];
-    if (opts.userId !== undefined) { where.push('user_id = ?'); args.push(opts.userId); }
-    if (opts.seriesKey !== undefined) { where.push('series_key = ?'); args.push(opts.seriesKey); }
-    const clause = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
-    const rows = this.db
-      .prepare(`SELECT * FROM items${clause} ORDER BY series_key, volume_from, id LIMIT ?`)
-      .all(...args, limit);
-    return (rows as ItemRow[]).map(rowToItem);
-  }
-
-  insertItem(input: {
-    userId: number;
-    seriesKey: string;
-    volumeFrom: number | null;
-    volumeTo: number | null;
-    status: ItemStatus;
-    title?: string | null;
-    author?: string | null;
-    jobId?: string | null;
-    source?: string | null;
-    rawText?: string | null;
-  }): LibraryItem {
-    const ts = now();
-    const r = this.db.prepare(
-      `INSERT INTO items
-        (user_id, series_key, volume_from, volume_to, status, title, author, job_id, source, raw_text, merged_from, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?) RETURNING *`
-    ).get(
-      input.userId, input.seriesKey, input.volumeFrom, input.volumeTo, input.status,
-      input.title ?? null, input.author ?? null, input.jobId ?? null,
-      input.source ?? null, input.rawText ?? null, ts, ts
-    ) as ItemRow;
-    return rowToItem(r);
-  }
-
-  patchItem(id: number, patch: {
-    status?: ItemStatus; jobId?: string | null; title?: string | null; author?: string | null;
-    seriesKey?: string; volumeFrom?: number | null; volumeTo?: number | null;
-  }): LibraryItem | null {
-    const cur = this.getItem(id);
-    if (!cur) return null;
-    const status = patch.status ?? cur.status;
-    const jobId = patch.jobId === undefined ? cur.jobId : patch.jobId;
-    const title = patch.title === undefined ? cur.title : patch.title;
-    const author = patch.author === undefined ? cur.author : patch.author;
-    // series_key と巻数まで書き換えられるのは管理画面から直す時だけ。
-    // タイトルを直してもキーが元のままだと、直したつもりで何も変わらない
-    const seriesKey = patch.seriesKey ?? cur.seriesKey;
-    const from = patch.volumeFrom === undefined ? cur.volumeFrom : patch.volumeFrom;
-    const to = patch.volumeTo === undefined ? cur.volumeTo : patch.volumeTo;
-    this.db.prepare('UPDATE items SET status=?, job_id=?, title=?, author=?, series_key=?, volume_from=?, volume_to=?, updated_at=? WHERE id=?')
-      .run(status, jobId, title, author, seriesKey, from, to, now(), id);
-    return this.getItem(id);
+  getHoster(key: string): Hoster | null {
+    const r = this.db.prepare('SELECT * FROM hosters WHERE key = ?').get(key) as HosterRow | undefined;
+    return r ? rowToHoster(r) : null;
   }
 
   /**
-   * 同じ作品の行をまとめて付け替える。
-   *
-   * series_key はタイトルから導くので、作品名を入れ直すと**散らばっていたキーが 1 つに集まる**。
-   * 作品名の分からないまま投入されて、生の文字列 (ミラーのホスト名まで含む) からキーが
-   * 作られてしまった行を救う道がこれ — 1 行ずつ直すと、直した分から別のキーへ移ってしまう。
+   * 無ければ作る。既にあれば domains に足りないドメインだけ足して返す。
+   * 「frdl が frdl.xyz を使い始めた」を同じ行に吸収するのがここ。
    */
-  relabelSeries(userId: number, seriesKey: string, next: { seriesKey: string; title: string; author: string | null }): number {
-    const r = this.db
-      .prepare('UPDATE items SET series_key=?, title=?, author=?, updated_at=? WHERE user_id=? AND series_key=?')
-      .run(next.seriesKey, next.title, next.author, now(), userId, seriesKey);
-    return Number(r.changes);
+  ensureHoster(def: HosterDef): Hoster {
+    const cur = this.getHoster(def.key);
+    if (cur) {
+      const missing = def.domains.filter((d) => !cur.domains.includes(d));
+      if (missing.length === 0) return cur;
+      return this.patchHoster(def.key, { domains: [...cur.domains, ...missing] }) ?? cur;
+    }
+    const ts = now();
+    const next = (this.db.prepare('SELECT COALESCE(MAX(priority), -1) + 1 AS n FROM hosters').get() as { n: number }).n;
+    this.db.prepare(`INSERT INTO hosters (key, label, domains, enabled, priority, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, ?, ?)`)
+      .run(def.key, def.label, JSON.stringify(def.domains), Number(next), ts, ts);
+    return this.getHoster(def.key)!;
   }
 
-  /** 合流の記録を積む。どのサイトから同じ巻が来たかを後から追えるようにする */
-  appendMerge(id: number, record: MergeRecord): LibraryItem | null {
-    const cur = this.getItem(id);
+  patchHoster(key: string, patch: {
+    label?: string; domains?: string[]; enabled?: boolean; priority?: number;
+  }): Hoster | null {
+    const cur = this.getHoster(key);
     if (!cur) return null;
-    const merged = [...cur.mergedFrom, record];
-    this.db.prepare('UPDATE items SET merged_from=?, updated_at=? WHERE id=?')
-      .run(JSON.stringify(merged), now(), id);
-    return this.getItem(id);
+    const next: Hoster = { ...cur, ...patch, updatedAt: now() };
+    this.db.prepare('UPDATE hosters SET label=?, domains=?, enabled=?, priority=?, updated_at=? WHERE key=?')
+      .run(next.label, JSON.stringify(next.domains), next.enabled ? 1 : 0, next.priority, next.updatedAt, key);
+    return next;
   }
 
-  deleteItem(id: number): boolean {
-    return this.db.prepare('DELETE FROM items WHERE id = ?').run(id).changes > 0;
+  /**
+   * 実績を 1 つ足す。成功なら最終成功日時も進める。
+   *
+   * 台帳に無いキーは黙って無視する — 数え漏らしより、ジョブの進行を止めるほうが高くつく。
+   */
+  bumpHoster(key: string, kind: 'ok' | 'fail' | 'human'): void {
+    const column = kind === 'ok' ? 'ok_count' : kind === 'fail' ? 'fail_count' : 'human_count';
+    const ts = now();
+    if (kind === 'ok') {
+      this.db.prepare(`UPDATE hosters SET ${column} = ${column} + 1, last_ok_at = ?, updated_at = ? WHERE key = ?`)
+        .run(ts, ts, key);
+    } else {
+      this.db.prepare(`UPDATE hosters SET ${column} = ${column} + 1, updated_at = ? WHERE key = ?`).run(ts, key);
+    }
   }
 
-  /** まとめて消す。1 作品ぶんの行を片付けるのに 1 行ずつ叩かせない */
-  deleteItems(ids: number[]): number {
-    if (ids.length === 0) return 0;
-    const marks = ids.map(() => '?').join(',');
-    return Number(this.db.prepare(`DELETE FROM items WHERE id IN (${marks})`).run(...ids).changes);
+  /**
+   * 過去のジョブから数え直した実績をまとめて入れる (初回の取り込み用)。
+   * bumpHoster と違って last_ok_at に当時の日時を入れられる。
+   */
+  seedHosterStats(key: string, s: { ok: number; fail: number; human: number; lastOkAt: string | null }): void {
+    this.db.prepare(`UPDATE hosters
+      SET ok_count = ok_count + ?, fail_count = fail_count + ?, human_count = human_count + ?,
+          last_ok_at = CASE WHEN ? IS NULL THEN last_ok_at
+                            WHEN last_ok_at IS NULL OR last_ok_at < ? THEN ? ELSE last_ok_at END,
+          updated_at = ?
+      WHERE key = ?`)
+      .run(s.ok, s.fail, s.human, s.lastOkAt, s.lastOkAt, s.lastOkAt, now(), key);
   }
 
-  /** ジョブを消した時の後始末。完走していない台帳は所持の証拠にならないので落とす */
-  deletePendingItemsByJob(jobId: string): number {
-    return Number(this.db.prepare("DELETE FROM items WHERE job_id = ? AND status = 'pending'").run(jobId).changes);
+  /** 優先度を 0,1,2... に振り直す。並べ替えの後始末 */
+  renumberHosters(keysInOrder: string[]): void {
+    const stmt = this.db.prepare('UPDATE hosters SET priority = ?, updated_at = ? WHERE key = ?');
+    const ts = now();
+    keysInOrder.forEach((key, i) => stmt.run(i, ts, key));
   }
 
   // ---- settings ----------------------------------------------------------

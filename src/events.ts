@@ -9,11 +9,21 @@ export interface CaptchaNotice {
   headless: boolean;
 }
 
+/** 「使用しない」アップローダなので登録しなかった、という知らせ */
+export interface RejectedNotice {
+  /** 業者名 (画面に出す) */
+  hosters: string[];
+  /** 何の投入だったか。DryEyes からなら作品名が入る */
+  label: string | null;
+  source: 'ui' | 'items';
+}
+
 export interface BusEvents {
   job: [job: Job];
   jobRemoved: [id: string];
   engine: [status: EngineStatus];
   captcha: [notice: CaptchaNotice];
+  rejected: [notice: RejectedNotice];
   log: [line: string];
 }
 

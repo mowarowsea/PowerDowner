@@ -1,12 +1,19 @@
 import type { Db } from './db.js';
-import type { Job, JobStatus, LibraryItem } from './types.js';
+import type { Job } from './types.js';
 import { parseItem, type ParsedItem } from './volume.js';
+import { askOwned, type OwnQuery, type PinaxConfig } from './pinax.js';
+import { log } from './events.js';
 
 /**
- * 取得済み台帳との突き合わせ。
+ * 投入 1 件を「落とす / もう持っている / 落とし中のジョブへ合流」に振り分ける。
  *
- * 「もう持っているか」「別サイトから来た同じ巻か」の判断はここ 1 か所だけで行う
- * (docs/ROADMAP.md 2 章。DryEyes 側には持ち込まない)。
+ * 判断はここ 1 か所だけで行う (docs/ROADMAP.md 2 章。DryEyes 側には持ち込まない)。
+ * 変わったのは**何に聞くか**で、
+ *
+ * - 「もう持っているか」  … pinax の棚 (POST /api/own)。PowerDowner は台帳を持たない
+ * - 「今落としている最中か」… 手元の jobs。**棚を見ても分からない** (まだファイルが無い)
+ *
+ * 台帳を捨てた経緯は docs/ROADMAP.md の「2.5 取得済みの判定は pinax に聞く」。
  */
 
 /** DryEyes から届く 1 件。urls は同一ファイルのミラー */
@@ -27,9 +34,9 @@ export type ItemDecision =
   /** 新規に落とす。missing は所持済みを除いた未取得の巻 (範囲判定に参加しない時は null) */
   | { kind: 'new'; parsed: ParsedItem; missing: number[] | null }
   /** 既に持っているので落とさない */
-  | { kind: 'skip'; parsed: ParsedItem; item: LibraryItem; reason: string }
-  /** 未完のジョブと同じもの。ミラー候補として合流させる */
-  | { kind: 'merge'; parsed: ParsedItem; item: LibraryItem; jobId: string };
+  | { kind: 'skip'; parsed: ParsedItem; reason: string }
+  /** 落とし中のジョブと同じもの。ミラー候補として合流させる */
+  | { kind: 'merge'; parsed: ParsedItem; jobId: string };
 
 /**
  * 所持済みの範囲で target を覆えているか調べ、覆えていない巻を返す。
@@ -53,130 +60,112 @@ export function missingVolumes(
   return missing;
 }
 
+const rangeLabel = (from: number, to: number): string =>
+  from === to ? `第${from}巻` : `第${from}-${to}巻`;
+
 /**
- * 投入 1 件を台帳と突き合わせて、落とすか・スキップか・合流かを決める。
- * 台帳はユーザー単位なので、見るのは userId の分だけ。
+ * 投入をまとめて振り分ける。
+ *
+ * **1 件ずつではなくまとめて聞く。** pinax への往復は 1 回で 200 件まで通るので、
+ * 20 件の投入で 20 回叩く理由が無い。手元の jobs で決まったものは聞かずに済ませる。
+ *
+ * **必ず inputs と同じ長さ・同じ並びで返す。**
  */
-export function decideItem(db: Db, userId: number, input: ItemInput): ItemDecision {
-  const meta = input.meta ?? {};
-  const parsed = parseItem({
-    title: meta.title ?? null,
-    volume: meta.volume ?? null,
-    rawText: meta.rawText ?? null,
-  });
-
-  // 巻数を読めなかったものは重なり判定に参加できない。
-  // 黙って捨てるより、もう一度落ちる方が被害が小さい。
-  if (parsed.volumeFrom === null || parsed.volumeTo === null || !parsed.seriesKey) {
-    return { kind: 'new', parsed, missing: null };
-  }
-
-  const from = parsed.volumeFrom;
-  const to = parsed.volumeTo;
-  const overlapping = db.findOverlappingItems(userId, parsed.seriesKey, from, to);
-
-  // 1. 既に持っている分で覆えているならスキップ
-  const owned = overlapping.filter((i) => i.status === 'have' || i.status === 'done');
-  const missing = missingVolumes(
-    { from, to },
-    owned.map((i) => ({ from: i.volumeFrom!, to: i.volumeTo! }))
+export async function decideItems(
+  db: Db,
+  pinax: PinaxConfig,
+  userId: number,
+  inputs: ItemInput[]
+): Promise<ItemDecision[]> {
+  const decisions: (ItemDecision | null)[] = new Array(inputs.length).fill(null);
+  const parsedAll = inputs.map((input) =>
+    parseItem({
+      title: input.meta?.title ?? null,
+      volume: input.meta?.volume ?? null,
+      rawText: input.meta?.rawText ?? null,
+    })
   );
-  if (owned.length > 0 && missing.length === 0) {
-    const covering = owned[0];
-    const range = covering.volumeFrom === covering.volumeTo
-      ? `第${covering.volumeFrom}巻`
-      : `第${covering.volumeFrom}-${covering.volumeTo}巻`;
-    return {
-      kind: 'skip',
-      parsed,
-      item: covering,
-      reason: covering.status === 'have' ? `所持済み (${range})` : `取得済み (${range})`,
-    };
+
+  const askAt: number[] = [];
+  const queries: OwnQuery[] = [];
+
+  for (let i = 0; i < inputs.length; i++) {
+    const parsed = parsedAll[i];
+
+    // 巻数を読めなかったものは重なり判定に参加できない。
+    // 黙って捨てるより、もう一度落ちる方が被害が小さい。
+    if (parsed.volumeFrom === null || parsed.volumeTo === null || !parsed.seriesKey) {
+      decisions[i] = { kind: 'new', parsed, missing: null };
+      continue;
+    }
+
+    // 手元で決まるものは手元で決める。落とし中のジョブは pinax には見えない
+    const local = decideFromJobs(db, userId, parsed);
+    if (local) {
+      decisions[i] = local;
+      continue;
+    }
+
+    const meta = inputs[i].meta ?? {};
+    askAt.push(i);
+    queries.push({
+      title: meta.title ?? null,
+      author: meta.author ?? null,
+      volume: meta.volume ?? null,
+      rawText: meta.rawText ?? null,
+    });
   }
 
-  // 2. 未完のジョブがあるなら、そこへミラーとして合流させる
-  const pending = overlapping.find((i) => i.status === 'pending' && i.jobId);
-  if (pending?.jobId) {
-    return { kind: 'merge', parsed, item: pending, jobId: pending.jobId };
+  const answers = await askOwned(pinax, queries);
+
+  for (let k = 0; k < askAt.length; k++) {
+    const i = askAt[k];
+    const parsed = parsedAll[i];
+    const answer = answers[k];
+
+    // 読み方が食い違ったら残す。片方だけ直すと、向こうが「持っている」と言った巻を
+    // こちらが「持っていない」と言い、静かに二重取得が始まる (volume.ts は移植元が同じ)
+    if (answer && answer.parsed.seriesKey !== parsed.seriesKey) {
+      log(
+        `[pinax] 読み方が食い違っています: こちら "${parsed.seriesKey}" / 棚 "${answer.parsed.seriesKey}"` +
+          ` (${queries[k].rawText ?? queries[k].title ?? ''})`
+      );
+    }
+
+    decisions[i] = answer?.owned
+      ? { kind: 'skip', parsed, reason: answer.reason || `所持済み (${rangeLabel(parsed.volumeFrom!, parsed.volumeTo!)})` }
+      : { kind: 'new', parsed, missing: answer?.missing ?? null };
   }
 
-  return { kind: 'new', parsed, missing };
+  return decisions as ItemDecision[];
 }
-
-// ---- 管理画面向けの診断 ---------------------------------------------------
-
-/** 台帳 1 行に添える、管理画面向けの見立て */
-export interface ItemDiagnosis {
-  /** この行が指しているジョブの今。ジョブを消していれば null */
-  job: { id: string; status: JobStatus; filename: string | null; error: string | null } | null;
-  /** 人が読んでそのまま手を打てる形の警告。空なら問題なし */
-  warnings: string[];
-}
-
-export type DiagnosedItem = LibraryItem & ItemDiagnosis;
-
-const JOB_STATUS_JA: Partial<Record<JobStatus, string>> = {
-  failed: '失敗', canceled: '中止', done: '完了',
-};
-
-/** 作品名に紛れ込んだファイル名を見つけるための拡張子。作品名にこれが入ることはまず無い */
-const FILE_EXT = /\.(rar|zip|7z|cbz|cbr|pdf|epub|mobi|azw3?)\b/i;
 
 /**
- * 台帳を一覧して、放っておくと困る行に印を付ける。
+ * 手元のジョブだけで決まる分を決める。決まらなければ null (= pinax に聞く)。
  *
- * 台帳は「持っている」と言い切る場所なので、**間違った行は 1 つでもその巻を永久に落とせなくする**。
- * 直せる画面を作る前に、どれが怪しいのかが見えないと直しようがない。
- *
- * ここでは何も書き換えない。消すか直すかは人が決める — 自動で片付けると、
- * 本当に持っている行まで巻き添えで消えて、静かに二重取得が始まる。
+ * 落とし終わったジョブも見るのは、**棚に載るまでに間がある**ため。pinax のスキャンは
+ * 3 時間おきなので、落とした直後に同じ巻が別サイトから来ると、棚はまだ「持っていない」と答える。
  */
-export function diagnoseItems(items: LibraryItem[], getJob: (id: string) => Job | null): DiagnosedItem[] {
-  return items.map((item) => {
-    const job = item.jobId ? getJob(item.jobId) : null;
-    const warnings: string[] = [];
+function decideFromJobs(db: Db, userId: number, parsed: ParsedItem): ItemDecision | null {
+  const from = parsed.volumeFrom!;
+  const to = parsed.volumeTo!;
+  const jobs = db.findOverlappingJobs(userId, parsed.seriesKey, from, to);
+  if (jobs.length === 0) return null;
 
-    // pending は「今落としている最中」の意味。投入されてもここへ合流させるだけなので、
-    // 進んでいないまま残ると、その巻の投入は全部この行に吸い込まれて何も起きなくなる
-    if (item.status === 'pending') {
-      if (!item.jobId) {
-        warnings.push('ダウンロード中の扱いですが、ジョブが結び付いていません。この行がある限り、同じ巻を投入しても何も落ちません');
-      } else if (!job) {
-        warnings.push('ダウンロード中の扱いですが、ジョブが残っていません。落とし直すにはこの行を消してください');
-      } else if (job.status === 'failed' || job.status === 'canceled') {
-        warnings.push(`ジョブは${JOB_STATUS_JA[job.status]}で終わっています。落とし直すにはこの行を消してください`);
-      }
+  const range = (j: Job): string => rangeLabel(j.volumeFrom!, j.volumeTo!);
+
+  // 1. 落とし終わったジョブで覆えているなら、棚を待たずにスキップ
+  const done = jobs.filter((j) => j.status === 'done');
+  if (done.length > 0) {
+    const missing = missingVolumes({ from, to }, done.map((j) => ({ from: j.volumeFrom!, to: j.volumeTo! })));
+    if (missing.length === 0) {
+      return { kind: 'skip', parsed, reason: `取得済み (${range(done[0])})` };
     }
+  }
 
-    if (item.volumeFrom === null || item.volumeTo === null) {
-      warnings.push('巻数を読めていないので、重複の判定に参加していません (この行は何も止めません)');
-    }
+  // 2. 落としている最中のジョブがあるなら、そこへミラーとして合流させる
+  const pending = jobs.find((j) => j.status !== 'done');
+  if (pending) return { kind: 'merge', parsed, jobId: pending.id };
 
-    if (!item.title || !item.title.trim()) {
-      warnings.push('作品名が無いため、キーを生の文字列から作っています。別サイトから来た同じ巻と噛み合いません');
-    } else if (FILE_EXT.test(item.title)) {
-      // ファイル名がそのまま作品名として入っている行。キーが落とすのは巻数だけなので、
-      // 拡張子もミラーのホスト名もキーに残り、他所から来た同じ巻と一生噛み合わない
-      warnings.push('作品名にファイル名が入っています。作品名だけに直さないと、別サイトから来た同じ巻と噛み合いません');
-    }
-
-    const dupes = items.filter(
-      (o) =>
-        o.id !== item.id &&
-        o.userId === item.userId &&
-        o.seriesKey === item.seriesKey &&
-        o.volumeFrom !== null && o.volumeTo !== null &&
-        item.volumeFrom !== null && item.volumeTo !== null &&
-        item.volumeFrom <= o.volumeTo && item.volumeTo >= o.volumeFrom
-    );
-    if (dupes.length > 0) {
-      warnings.push(`同じ巻を指す行が他にもあります (id ${dupes.map((d) => d.id).join(', ')})`);
-    }
-
-    return {
-      ...item,
-      job: job ? { id: job.id, status: job.status, filename: job.filename, error: job.error } : null,
-      warnings,
-    };
-  });
+  return null;
 }

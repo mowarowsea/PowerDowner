@@ -1,5 +1,6 @@
 import { loadConfig } from './config.js';
 import { Db } from './db.js';
+import { bootstrapHosters } from './hosters.js';
 import { Aria2Engine, type Progress } from './engines/aria2.js';
 import { Jd2Engine } from './engines/jd2.js';
 import { BrowserEngine } from './engines/browser.js';
@@ -13,6 +14,8 @@ import type { ResolvedDownload } from './types.js';
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const db = new Db(cfg.dataDir);
+  // アップローダの台帳を用意する。以降は DB が正で、config.json は初期の並び順だけ
+  bootstrapHosters(db, cfg.mirrors.priority);
 
   // エンジン → キューのコールバックは後から束ねる (循環参照回避)
   let queue: Queue | null = null;

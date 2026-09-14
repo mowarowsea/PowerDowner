@@ -19,15 +19,33 @@
       <span>ユーザー</span>
       <select id="userSelect"></select>
     </label>
-    <button id="btnItems" class="ghost">台帳</button>
+    <button id="btnHosters" class="ghost">アップローダ</button>
     <button id="btnUsers" class="ghost">ユーザー / 設定</button>
   </header>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <div id="captchaBanner" class="banner" hidden></div>
 
   <main>
     <section class="card add">
       <textarea id="urls" rows="3" placeholder="URL を貼り付け (複数行 OK)&#10;例: https://civitai.com/models/12345  /  https://rapidgator.net/file/..."></textarea>
+      <details id="workBox" class="work">
+        <summary>作品として登録する (DryEyes を通さない)</summary>
+        <p class="hint">
+          作品名を入れると、落ち終わった時に <code>[著者] 作品名</code> のフォルダへ
+          <code>[著者] 作品名 第nn巻.拡張子</code> で整理されます。<strong>棚 (pinax) に既にある巻は落としません。</strong><br>
+          <strong>巻数を書いた時</strong>は、貼った URL 全部を<strong>同じ 1 ファイルのミラー</strong>
+          (上から順に試す代わりの落とし先) として 1 件にまとめます。<br>
+          <strong>巻数が空欄の時</strong>は <strong>1 行 1 巻</strong>として登録し、巻数は URL のファイル名から読みます。
+          読めなかった巻は名前を変えずにそのまま置きます。
+        </p>
+        <div class="row">
+          <input id="workTitle" type="text" placeholder="作品名 (入れると作品として登録される)">
+          <input id="workAuthor" type="text" placeholder="著者 (任意)">
+          <input id="workVolume" type="text" class="vol" placeholder="巻数 (例: 3 / 1-7)">
+        </div>
+      </details>
       <div class="row">
         <input id="destDir" type="text" placeholder="保存先を上書き (空欄ならユーザーの既定フォルダ)">
         <button id="btnAdd" class="primary">追加</button>
@@ -78,33 +96,33 @@
     </form>
   </dialog>
 
-  <dialog id="itemsDialog">
-    <form method="dialog" class="dialog">
-      <h2>台帳 <span id="itemsOwner" class="hint"></span></h2>
+  <dialog id="hostersDialog">
+    <form method="dialog" class="dialog wide">
+      <h2>アップローダ</h2>
       <p class="hint">
-        「もう持っている」の記録です。ここに載っている巻は、DryEyes から投入されても落としません。<br>
-        <strong>落とし直したい時は、その行を消してください。</strong>
-        作品名を直すと series キーを導き直すので、ばらばらのキーになっていた行が 1 つにまとまります。
+        実績を見て、<strong>使うかどうかと試す順番</strong>を決めます。「使用する」を外したアップローダは、
+        DryEyes から来ても手で貼っても<strong>ジョブになりません</strong>。<br>
+        サイトの仕様が変わって通らなくなったら、直すのではなくここを外してください。ほかのミラーで回ります。
       </p>
-      <div class="row">
-        <input id="itemFilter" type="text" placeholder="作品名・ファイル名・投入元で絞り込み">
-        <label class="toggle"><input type="checkbox" id="itemOnlyBad"> 要確認だけ</label>
-        <span id="itemsSummary" class="hint nowrap"></span>
-        <button type="button" id="btnItemsReload" class="ghost small">再読み込み</button>
-      </div>
-      <div id="itemsList" class="ledger"></div>
-      <div id="itemsEmpty" class="empty" hidden></div>
-
-      <h2>手元にある巻を登録</h2>
-      <p class="hint">紙で買った巻や、別の手段で入手済みの巻を入れておくと、投入されても落としません。範囲で入れると 1 巻ずつに分かれます。</p>
-      <div class="row">
-        <input id="newItemTitle" type="text" placeholder="作品名">
-        <input id="newItemAuthor" type="text" placeholder="作者 (任意)">
-        <input id="newItemVolumes" type="text" placeholder="巻数 (3 または 1-7)" class="vol">
-        <button type="button" id="btnNewItem" class="primary small">登録</button>
-      </div>
-
-      <div id="itemsError" class="error" hidden></div>
+      <div id="hostersWarn" class="banner warn" hidden></div>
+      <table class="hosters">
+        <thead>
+          <tr>
+            <th>アップローダ</th>
+            <th class="num" title="実ファイルが残った回数">成功</th>
+            <th class="num" title="ダウンロードを始められなかった回数を含む。所持済みスキップは含まない">失敗</th>
+            <th class="num" title="CAPTCHA などで人間の操作を求めた回数 (ジョブごとに 1 回)">人間待ち</th>
+            <th>最後の成功</th>
+            <th class="mid">使用する</th>
+            <th class="mid">優先度</th>
+          </tr>
+        </thead>
+        <tbody id="hostersBody"></tbody>
+      </table>
+      <p class="hint">
+        上にあるものから先に試します。同じファイルが複数のアップローダにある時だけ効きます。
+      </p>
+      <div id="hostersError" class="error" hidden></div>
       <div class="row end">
         <button value="close" class="ghost">閉じる</button>
       </div>

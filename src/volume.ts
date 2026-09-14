@@ -69,8 +69,20 @@ function nfkc(s: unknown): string {
   return String(s ?? '').normalize('NFKC');
 }
 
+export type VolumeUnit = '巻' | '話';
+
+/** 見つかった巻数表現。位置は NFKC 正規化した文字列に対するもの */
+export interface VolumeMatch {
+  from: number;
+  to: number;
+  /** 「第3話」を「第3巻」と書き換えてしまわないよう、単位も持ち回る */
+  unit: VolumeUnit;
+  start: number;
+  end: number;
+}
+
 /** 巻数表現を探す。見つかった位置も返す (タイトルから削るため) */
-function findVolume(text: string): { from: number; to: number; start: number; end: number } | null {
+function findVolume(text: string): VolumeMatch | null {
   const s = nfkc(text).toLowerCase();
   for (const { re, pick } of PATTERNS) {
     re.lastIndex = 0;
@@ -84,9 +96,23 @@ function findVolume(text: string): { from: number; to: number; start: number; en
     // 次のパターンへ流すと「1-2024巻」から「2024巻」を、「6-1巻」から「1巻」を拾ってしまうので、
     // ここで「巻数は読めなかった」と確定させる。
     if (from > to || to - from > MAX_SPAN) return null;
-    return { from, to, start: m.index ?? 0, end: (m.index ?? 0) + m[0].length };
+    // 単位はマッチした文字列そのものから見る。「話」で書かれていたものを
+    // 「巻」と書き換えると、リネーム後のファイル名が嘘になる
+    const unit: VolumeUnit = m[0].includes('話') ? '話' : '巻';
+    return { from, to, unit, start: m.index ?? 0, end: (m.index ?? 0) + m[0].length };
   }
   return null;
+}
+
+/**
+ * 巻数表現を、NFKC 正規化した文字列と一緒に返す。
+ *
+ * 位置 (start/end) は**正規化後の文字列に対するもの**なので、必ず normalized と組で使うこと。
+ * 元の文字列に当てると、全角英数が半角に畳まれた分だけずれる。
+ * リネーム側が「どこからが巻数か」を知ってタイトルを切り出すために要る。
+ */
+export function findVolumeIn(text: string): { normalized: string; match: VolumeMatch | null } {
+  return { normalized: nfkc(text), match: findVolume(text) };
 }
 
 /**

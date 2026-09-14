@@ -7,6 +7,7 @@ import { loadConfig } from './config.js';
 import { Db } from './db.js';
 import { Queue } from './queue.js';
 import { pickFreeHostMirror, sortByPriority } from './mirrors.js';
+import { bootstrapHosters } from './hosters.js';
 import { HOST_LIMIT } from './engines/jd2.js';
 import type { Aria2Engine } from './engines/aria2.js';
 import type { Jd2Engine } from './engines/jd2.js';
@@ -18,6 +19,8 @@ function makeQueue(priority: string[]) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-mir-'));
   const cfg = { ...loadConfig(), dataDir: dir, mirrors: { priority, hostLimitWaitSec: 0 } };
   const db = new Db(dir);
+  // 優先度の正は台帳 (hosters テーブル)。config の並びはそこへ流し込んでから使う
+  bootstrapHosters(db, priority);
   const stub = {} as unknown as Aria2Engine & Jd2Engine & BrowserEngine;
   const queue = new Queue(cfg, db, stub, stub, stub,
     { resolve: () => new Promise(() => {}) } as unknown as Router);
@@ -63,9 +66,9 @@ test('URL として読めないものは末尾に回る (落ちない)', () => {
   );
 });
 
-test('投入時に候補が優先度順に並ぶ', () => {
+test('投入時に候補が優先度順に並ぶ', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
-  const r = queue.addItems({
+  const r = await queue.addItems({
     userId: user.id,
     items: [{
       urls: ['https://katfile.com/x', 'https://dailyuploads.net/x', 'https://uploady.io/x'],
@@ -77,9 +80,9 @@ test('投入時に候補が優先度順に並ぶ', () => {
   assert.deepEqual(job.meta.mirrors, ['https://uploady.io/x', 'https://katfile.com/x']);
 });
 
-test('失敗しても候補が残っていれば確定させず次のミラーへ移る', () => {
+test('失敗しても候補が残っていれば確定させず次のミラーへ移る', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
-  const r = queue.addItems({
+  const r = await queue.addItems({
     userId: user.id,
     items: [{ urls: ['https://uploady.io/x', 'https://dailyuploads.net/x'], meta: { title: '作品名 第1巻' } }],
   });
@@ -98,9 +101,9 @@ test('失敗しても候補が残っていれば確定させず次のミラー�
   assert.match(tried[0].error, /522/);
 });
 
-test('候補を使い切ったら失敗を確定させる', () => {
+test('候補を使い切ったら失敗を確定させる', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
-  const r = queue.addItems({
+  const r = await queue.addItems({
     userId: user.id,
     items: [{ urls: ['https://uploady.io/x', 'https://dailyuploads.net/x'], meta: { title: '作品名 第1巻' } }],
   });
@@ -113,9 +116,9 @@ test('候補を使い切ったら失敗を確定させる', () => {
   assert.equal((job.meta.tried as unknown[]).length, 2);
 });
 
-test('ミラーへ移る時は経路の記憶と進捗を落とす', () => {
+test('ミラーへ移る時は経路の記憶と進捗を落とす', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
-  const r = queue.addItems({
+  const r = await queue.addItems({
     userId: user.id,
     items: [{ urls: ['https://uploady.io/x', 'https://dailyuploads.net/x'], meta: { title: '作品名 第1巻' } }],
   });
@@ -130,9 +133,9 @@ test('ミラーへ移る時は経路の記憶と進捗を落とす', () => {
   assert.equal(job.bytesDone, 0);
 });
 
-test('ブラウザ引き継ぎの再試行余地があるうちはミラーへ移らない', () => {
+test('ブラウザ引き継ぎの再試行余地があるうちはミラーへ移らない', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
-  const r = queue.addItems({
+  const r = await queue.addItems({
     userId: user.id,
     items: [{ urls: ['https://uploady.io/x', 'https://dailyuploads.net/x'], meta: { title: '作品名 第1巻' } }],
   });
@@ -148,15 +151,15 @@ test('ブラウザ引き継ぎの再試行余地があるうちはミラーへ�
   assert.deepEqual(job.meta.mirrors, ['https://uploady.io/x']);
 });
 
-test('合流で増えた候補も優先度順に並び直す', () => {
+test('合流で増えた候補も優先度順に並び直す', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
-  const first = queue.addItems({
+  const first = await queue.addItems({
     userId: user.id,
     items: [{ urls: ['https://katfile.com/x'], meta: { title: '作品名 第1巻' } }],
   });
   const id = first.created[0].id;
 
-  queue.addItems({
+  await queue.addItems({
     userId: user.id,
     items: [{ urls: ['https://unknown.example/x', 'https://dailyuploads.net/x'], meta: { title: '作品名 第1巻' }, source: 'dryeyes:w2' }],
   });
@@ -190,7 +193,7 @@ test('全部ふさがっていれば選ばない (移し替えても同じ上限
 
 test('上限で待たされたら、空いている別のアップローダへ移る', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
-  const r = queue.addItems({
+  const r = await queue.addItems({
     userId: user.id,
     items: [
       {
@@ -217,7 +220,7 @@ test('上限で待たされたら、空いている別のアップローダへ�
 
 test('移せる先が無ければ、失敗にせず待たせたままにする', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
-  const r = queue.addItems({
+  const r = await queue.addItems({
     userId: user.id,
     items: [
       { urls: ['https://dailyuploads.net/x', 'https://uploady.io/x'], meta: { title: '作品名 第1巻' } },
@@ -248,7 +251,7 @@ test('JD2 の上限メッセージを拾う (英語・日本語とも実機の�
   assert.ok(HOST_LIMIT.test('ダウンロード制限に達しました'));
 });
 
-test('進行中・別種の停止は上限と見なさない', () => {
+test('進行中・別種の停止は上限と見なさない', async () => {
   // ここを広く取りすぎると、落ちているのに別ホストへ移してしまう
   assert.ok(!HOST_LIMIT.test('Downloading'));
   assert.ok(!HOST_LIMIT.test('Connecting...'));
@@ -262,9 +265,9 @@ test('進行中・別種の停止は上限と見なさない', () => {
 // ---- 落ちてこなかったものを完了にしない ----------------------------------
 
 /** 完了を受け取れる状態のジョブを 1 件用意する */
-function downloadedJob(priority = PRIORITY) {
+async function downloadedJob(priority = PRIORITY) {
   const h = makeQueue(priority);
-  const r = h.queue.addItems({
+  const r = await h.queue.addItems({
     userId: h.user.id,
     items: [{ urls: ['https://dailyuploads.net/x', 'https://uploady.io/x'], meta: { title: '作品名 第1巻' } }],
   });
@@ -274,8 +277,8 @@ function downloadedJob(priority = PRIORITY) {
   return { ...h, id, dest };
 }
 
-test('0 バイトは完了にせず、次のミラーへ回す', () => {
-  const { db, queue, id, dest } = downloadedJob();
+test('0 バイトは完了にせず、次のミラーへ回す', async () => {
+  const { db, queue, id, dest } = await downloadedJob();
   fs.writeFileSync(path.join(dest, 'x.rar'), '');
 
   queue.onDone(id, 'x.rar');
@@ -284,12 +287,12 @@ test('0 バイトは完了にせず、次のミラーへ回す', () => {
   assert.notEqual(job.status, 'done');
   // 候補が残っているので失敗を確定させず次へ移る
   assert.equal(job.url, 'https://uploady.io/x');
-  // 台帳に「持っている」と書かれていないこと (書かれると二度と落ちてこない)
-  assert.equal(db.findItemByJob(id)?.status ?? 'pending', 'pending');
+  // done になっていないので「取得済み」の判定にも参加しない。
+  // ここが done に化けると、その巻は二度と落ちてこない (src/library.ts)
 });
 
-test('HTML のエラーページを掴まされても完了にしない', () => {
-  const { db, queue, id, dest } = downloadedJob();
+test('HTML のエラーページを掴まされても完了にしない', async () => {
+  const { db, queue, id, dest } = await downloadedJob();
   // ホスターは拡張子をそのままにエラーページを返してくる
   fs.writeFileSync(path.join(dest, 'x.rar'), '<!DOCTYPE html>\n<html><body>Link expired</body></html>');
 
@@ -300,8 +303,8 @@ test('HTML のエラーページを掴まされても完了にしない', () => 
   assert.equal(job.url, 'https://uploady.io/x');
 });
 
-test('中身があれば完了。実ファイルの大きさを正とする', () => {
-  const { db, queue, id, dest } = downloadedJob();
+test('中身があれば完了。実ファイルの大きさを正とする', async () => {
+  const { db, queue, id, dest } = await downloadedJob();
   const body = Buffer.alloc(4096, 7);
   fs.writeFileSync(path.join(dest, 'x.rar'), body);
 
@@ -312,21 +315,67 @@ test('中身があれば完了。実ファイルの大きさを正とする', ()
   // 進捗を 1 度も報告しないエンジンでも 0 B のままにならない
   assert.equal(job.bytesTotal, 4096);
   assert.equal(job.bytesDone, 4096);
-  assert.equal(db.findItemByJob(id)?.status, 'done');
+  // done になったジョブは、棚に載るまでの間「取得済み」として次の投入を弾く
 });
 
-test('ファイルが見つからなくても、受け取った実績があれば完了にする', () => {
+test('ファイルが見つからなくても、受け取った実績があれば完了にする', async () => {
   // JD2 はパッケージ名のフォルダへ別名で置くことがある。
   // 見つけられないだけの完走を失敗にするほうが害が大きい
-  const { db, queue, id } = downloadedJob();
+  const { db, queue, id } = await downloadedJob();
   db.patchJob(id, { bytesDone: 12345, bytesTotal: 12345 });
 
   queue.onDone(id, '見つからない名前.rar');
   assert.equal(db.getJob(id)!.status, 'done');
 });
 
-test('ファイルも無く 1 バイトも受け取っていなければ完了にしない', () => {
-  const { db, queue, id } = downloadedJob();
+test('ファイルも無く 1 バイトも受け取っていなければ完了にしない', async () => {
+  const { db, queue, id } = await downloadedJob();
   queue.onDone(id, '見つからない名前.rar');
   assert.notEqual(db.getJob(id)!.status, 'done');
+});
+
+test('再試行は候補を全部やり直す (見限った分も戻して優先度順に並べ直す)', async () => {
+  const { db, queue, user } = makeQueue(PRIORITY);
+  const r = await queue.addItems({
+    userId: user.id,
+    items: [{
+      urls: ['https://dailyuploads.net/x', 'https://uploady.io/x', 'https://katfile.com/x'],
+      meta: { title: '作品名 第1巻' },
+    }],
+  });
+  const id = r.created[0].id;
+  queue.onFailed(id, '1 回目');
+  queue.onFailed(id, '2 回目');
+  queue.onFailed(id, '3 回目');
+  assert.equal(db.getJob(id)!.status, 'failed');
+
+  db.patchJob(id, { filename: 'old.rar', bytesDone: 999, meta: { route: 'browser' } });
+  const job = queue.retry(id);
+
+  assert.equal(job.status, 'queued');
+  assert.equal(job.error, null);
+  // 1 件目 (優先度が一番高いところ) からやり直す
+  assert.equal(job.url, 'https://dailyuploads.net/x');
+  assert.deepEqual(job.meta.mirrors, ['https://uploady.io/x', 'https://katfile.com/x']);
+  assert.deepEqual(job.meta.tried, []);
+  // 前回の進捗と経路は引き継がない
+  assert.equal(job.filename, null);
+  assert.equal(job.bytesDone, 0);
+  assert.equal(job.meta.route, '');
+});
+
+test('再試行は候補が 1 件でも動く', async () => {
+  const { db, queue, user } = makeQueue(PRIORITY);
+  const r = await queue.addItems({
+    userId: user.id,
+    items: [{ urls: ['https://uploady.io/x'], meta: { title: '作品名 第1巻' } }],
+  });
+  const id = r.created[0].id;
+  queue.onFailed(id, '駄目でした');
+
+  const job = queue.retry(id);
+  assert.equal(job.url, 'https://uploady.io/x');
+  assert.deepEqual(job.meta.mirrors, []);
+  assert.deepEqual(job.meta.tried, []);
+  assert.equal(db.getJob(id)!.status, 'queued');
 });

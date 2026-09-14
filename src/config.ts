@@ -33,18 +33,33 @@ export interface Config {
     startTimeoutSec: number;  // 起動待ちの上限。初回は自動アップデートで数分かかる
     stopOnExit: boolean;      // PowerDowner の終了時に JD2 も落とす (autoStart 時のみ)
   };
-  library: {
+  /**
+   * 蔵書カタログ pinax。「この巻もう持ってる?」の答えはここだけが知っている。
+   *
+   * PowerDowner は取得済みの台帳を持たない (docs/ROADMAP.md 2.5)。聞けない時は
+   * 「持っていない」に倒して落とすので、ここが未設定でも停止中でも投入は通る。
+   */
+  pinax: {
+    /** 空にすると聞きに行かない (= 判定なしで全部落とす) */
+    baseUrl: string;
+    /** pinax の config.json の apiToken と同じ値。向こうが空なら不要 */
+    token: string;
     /**
-     * 「もう持っている」を台帳に起こすためにスキャンしてよいフォルダ。
-     * ここに列挙したパスだけが対象になる (LAN に開いているので任意パスは読ませない)。
-     *
-     * 既定が空なのは、**保存先のフォルダ構成をまだ決めていない**ため。
-     * 決めたらここに書く。決まるまでスキャンは無効のままで構わない
-     * (手動の範囲登録だけでも台帳は使える)。
+     * 応答を待つ上限。**短くしすぎないこと** — ここで諦めると持っている巻を
+     * もう一度落とす。棚は SQLite なので普段は数十 ms で返る。
      */
-    scanDirs: string[];
-    /** サブフォルダまで辿るか。作品ごとにフォルダを掘る構成にするなら true */
-    scanRecursive: boolean;
+    timeoutMs: number;
+  };
+  /**
+   * 完了時のリネームとフォルダ分け。形式は固定で、テンプレートは設けない —
+   * 自由に書けるようにすると棚 (pinax) が読み戻せない名前を人間が書けてしまい、
+   * 手元にあるのに「持っていない」と判断して二重に落とす (src/naming.ts)。
+   */
+  rename: {
+    /** false なら落ちてきた名前のまま置く */
+    enabled: boolean;
+    /** 作品ごとに 「[著者] 作品名」 フォルダを掘る */
+    folder: boolean;
   };
   mirrors: {
     /**
@@ -73,6 +88,21 @@ export interface Config {
      * 人間判定に嫌われるので全サイトには効かせない。
      */
     keepAwakeHosts: string[];
+    /**
+     * 広告が操作を邪魔するサイト。ここに書いたドメインでだけ強い広告対策を効かせる:
+     * 他所への `window.open` を潰し、それでも開いたタブは行き先が分かった瞬間に閉じ、
+     * 広告ドメインへ飛ばされたら元のページへ戻す。
+     *
+     * 全サイトに効かせないのは keepAwakeHosts と同じ理由 —
+     * ページ読み込み前のスクリプト差し込みは自動化の痕跡になり、Cloudflare Turnstile に嫌われる。
+     * 人間判定が厳しいサイト (katfile, rapidgator) には**入れないこと**。
+     */
+    adGuardHosts: string[];
+    /**
+     * 遮断する広告配信網の追加ドメイン (既定のリストに足される)。
+     * 新しい配信網に当たったら `/api/jobs/:id/dump` の「遮断」欄と data/debug の HTML を見て足す。
+     */
+    adHosts: string[];
   };
 }
 
@@ -98,9 +128,14 @@ const DEFAULTS: Config = {
     startTimeoutSec: 240,
     stopOnExit: true,
   },
-  library: {
-    scanDirs: [],
-    scanRecursive: false,
+  pinax: {
+    baseUrl: 'http://127.0.0.1:3838',
+    token: '',
+    timeoutMs: 5000,
+  },
+  rename: {
+    enabled: true,
+    folder: true,
   },
   mirrors: {
     hostLimitWaitSec: 60,
@@ -123,6 +158,9 @@ const DEFAULTS: Config = {
     timeoutMinutes: 20,
     maxConcurrent: 3,
     keepAwakeHosts: ['uploady.io'],
+    // Turnstile を出さないサイトなので強い広告対策を入れてよい
+    adGuardHosts: ['dailyuploads.net'],
+    adHosts: [],
   },
 };
 
@@ -145,7 +183,8 @@ export function loadConfig(): Config {
     ...user,
     aria2: { ...DEFAULTS.aria2, ...(user.aria2 ?? {}) },
     jd2: { ...DEFAULTS.jd2, ...(user.jd2 ?? {}) },
-    library: { ...DEFAULTS.library, ...(user.library ?? {}) },
+    pinax: { ...DEFAULTS.pinax, ...(user.pinax ?? {}) },
+    rename: { ...DEFAULTS.rename, ...(user.rename ?? {}) },
     mirrors: { ...DEFAULTS.mirrors, ...(user.mirrors ?? {}) },
     browser: { ...DEFAULTS.browser, ...(user.browser ?? {}) },
   };

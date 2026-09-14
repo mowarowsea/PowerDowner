@@ -30,6 +30,15 @@ export interface Job {
   speed: number;
   error: string | null;
   externalId: string | null;
+  /**
+   * 投入時に読んだ「どの作品の何巻か」。**判定のためにここへ焼く。**
+   * 別サイトから来た同じ巻の合流と、落とした直後 (まだ棚に載っていない) の
+   * 二重取得をこれで止める (src/library.ts)。読めなければ null で、重なりの判定に
+   * 参加しない — 台帳と違って、ジョブを消せばその巻はまた落とせる。
+   */
+  seriesKey: string | null;
+  volumeFrom: number | null;
+  volumeTo: number | null;
   meta: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -53,38 +62,43 @@ export interface EngineStatus {
   detail: string;
 }
 
-/**
- * 取得済みアイテムの台帳。ジョブとは別に持つ — サイト A で落とした数か月後に
- * サイト B へ同じ巻が出るのが普通に起きるので、ジョブを消しても所持情報は残す必要がある。
- * (docs/ROADMAP.md 2 章「取得済みアイテムの台帳」)
- */
-export type ItemStatus =
-  | 'have'     // PowerDowner を通さずに入手済み。投入されても落とさない
-  | 'done'     // ジョブが完走した
-  | 'pending'; // job_id のジョブが進行中または失敗中。ここへの投入は合流させる
-
-/** 別サイトから同じ巻が投入され、ミラーとして合流した記録 */
+/** 別サイトから同じ巻が投入され、ミラーとして合流した記録。jobs.meta.mergedFrom に積む */
 export interface MergeRecord {
   source: string | null;   // 'dryeyes:<watch uuid>' など
   urls: string[];
   at: string;
 }
 
-export interface LibraryItem {
-  id: number;
-  /** 持ち主。台帳はユーザー単位なので、重なり判定は常にこれで絞ってから行う */
-  userId: number;
-  seriesKey: string;
-  /** 巻数。取れなかった場合は null で、範囲の重なり判定に参加しない */
-  volumeFrom: number | null;
-  volumeTo: number | null;
-  status: ItemStatus;
-  title: string | null;
-  author: string | null;
-  jobId: string | null;
-  source: string | null;
-  rawText: string | null;
-  mergedFrom: MergeRecord[];
+/**
+ * アップローダ (ホスター) 1 業者分。別名ドメインをまとめて 1 行にする。
+ * 実績はここに貯めて、どこから試すか・そもそも使うかの判断材料にする。
+ */
+export interface Hoster {
+  /** 業者キー。'frdl' のような登録可能ドメインの先頭ラベル */
+  key: string;
+  /** 画面に出す名前 */
+  label: string;
+  /** この業者のドメイン。frdl.io / frdl.hk のような別名を並べる */
+  domains: string[];
+  /** false なら投入されてもジョブにしない */
+  enabled: boolean;
+  /** 小さいほど先に試す */
+  priority: number;
+  /** 実ファイルが残った回数 */
+  okCount: number;
+  /** ダウンロードを始められなかった / 途中で駄目だった回数。台帳スキップは含まない */
+  failCount: number;
+  /** 人間の操作を求めた回数 (ジョブごとに 1 回) */
+  humanCount: number;
+  lastOkAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
+
+/** 台帳に行を起こすための種 */
+export interface HosterDef {
+  key: string;
+  label: string;
+  domains: string[];
+}
+

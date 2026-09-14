@@ -142,3 +142,69 @@ table.users td:last-child { width: 130px; white-space: nowrap; }
 
 .log { max-width: 1100px; margin: 0 auto; padding: 0 16px 24px; }
 .log pre { margin: 0; font-size: 11px; color: var(--muted); max-height: 140px; overflow: auto; white-space: pre-wrap; }
+
+/* ---- アップローダの台帳 -------------------------------------------------- */
+dialog:has(.wide) { width: min(860px, 96vw); }
+table.hosters { width: 100%; border-collapse: collapse; }
+table.hosters th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px;
+  padding: 6px 4px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table.hosters td { padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.hosters th.num, table.hosters td.num { text-align: right; width: 6ch; font-variant-numeric: tabular-nums; }
+table.hosters th.mid, table.hosters td.mid { text-align: center; }
+table.hosters td.num.ok { color: var(--ok); }
+table.hosters td.num.bad { color: var(--bad); }
+table.hosters td.num.warnnum { color: var(--human); }
+/* 使用しない行は、消さずに沈める。実績を見比べて戻す判断ができるようにしておく */
+table.hosters tr.off td { opacity: .45; }
+table.hosters tr.off td.mid:last-child, table.hosters tr.off td.mid { opacity: 1; }
+.hoster { display: flex; align-items: center; gap: 8px; }
+.hoster .fav { flex: none; border-radius: 3px; }
+.hoster .name { font-weight: 600; }
+.hint.small { font-size: 11px; margin: 0; }
+.banner.warn { background: color-mix(in srgb, var(--bad) 12%, var(--card)); border-color: var(--bad); margin: 0 0 12px; }
+
+/* ---- トースト ------------------------------------------------------------ */
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 50;
+  display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.toast { pointer-events: auto; max-width: min(420px, 90vw); padding: 10px 14px; border-radius: 8px;
+  background: var(--card); border: 1px solid var(--border); color: var(--text); font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.18); animation: toast-in .18s ease-out; }
+.toast.warn { border-color: var(--human); background: color-mix(in srgb, var(--human) 12%, var(--card)); }
+.toast.out { opacity: 0; transform: translateY(6px); transition: opacity .35s, transform .35s; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+/* 右寄せの数字と日付がくっつくので、最後の成功だけ間を空ける */
+table.hosters td.nowrap:not(.mid) { padding-left: 14px; }
+
+/* ミラー候補の内訳。同時には 1 か所しか走らないので、
+   「今どこを試していて、どこが残っているか」を上から順に並べる */
+.job .mirbtn { margin-left: 6px; padding: 0 6px; font-size: 11px; line-height: 16px; border-radius: 999px; color: var(--muted); }
+.job .mirbtn[hidden] { display: none; }
+.job .mirs { grid-column: 1 / -1; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.job .mirnote { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.mirlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.mir { display: grid; grid-template-columns: 22px 84px 120px minmax(0, 1fr); gap: 8px; align-items: baseline; font-size: 12px; }
+.mir .mnum { color: var(--muted); text-align: right; }
+.mir .mhoster { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mir .murl { color: var(--muted); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mir .murl:hover { text-decoration: underline; }
+.mir .merr { grid-column: 4; color: var(--bad); white-space: pre-wrap; }
+.mir .moff { color: var(--bad); }
+.mir .mbadge { font-size: 11px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); text-align: center; }
+.mir.s-active .mbadge { border-color: var(--accent); color: var(--accent); }
+.mir.s-active .mhoster { font-weight: 600; }
+.mir.s-done .mbadge { border-color: var(--ok); color: var(--ok); }
+.mir.s-failed .mbadge { border-color: var(--bad); color: var(--bad); }
+.mir.s-failed .mhoster, .mir.s-pending .mhoster { color: var(--muted); }
+@media (max-width: 720px) {
+  /* 折り返さないと候補ボタンが省略記号の向こうへ消える */
+  .job .name .sub { white-space: normal; }
+  .mir { grid-template-columns: 22px 84px minmax(0, 1fr); }
+  .mir .murl { grid-column: 2 / -1; }
+  .mir .merr { grid-column: 2 / -1; }
+}
+
+.work { margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
+.work[open] { padding-bottom: 10px; }
+.work summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.work .hint { margin: 8px 0 0; line-height: 1.6; }
+.work code { font-size: 11px; }

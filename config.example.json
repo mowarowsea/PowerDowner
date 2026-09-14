@@ -37,9 +37,14 @@
       "mexashare.com"
     ]
   },
-  "library": {
-    "scanDirs": [],
-    "scanRecursive": false
+  "pinax": {
+    "baseUrl": "http://127.0.0.1:3838",
+    "token": "",
+    "timeoutMs": 5000
+  },
+  "rename": {
+    "enabled": true,
+    "folder": true
   },
   "mirrors": {
     "hostLimitWaitSec": 60,
@@ -81,6 +86,10 @@
     "maxConcurrent": 3,
     "keepAwakeHosts": [
       "uploady.io"
-    ]
+    ],
+    "adGuardHosts": [
+      "dailyuploads.net"
+    ],
+    "adHosts": []
   }
 }
