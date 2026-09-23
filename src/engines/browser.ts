@@ -79,9 +79,13 @@ interface Waiting {
 }
 
 /** サイト側が落ちている (Cloudflare 5xx など) ときの再試行間隔と回数 */
-/** Cloudflare の人間判定ページか。403 でも、これはサイトに拒否されたのではなく「解けば通る」 */
+/**
+ * Cloudflare の人間判定ページか。403 でも、これはサイトに拒否されたのではなく「解けば通る」。
+ * `server: cloudflare` では見分けられない — Cloudflare 越しのサイトは奥の nginx が返した
+ * 403 (ファイル削除など) にも付く (dailyuploads)。判定ページにだけ付く cf-mitigated で見る
+ */
 export function isCloudflareChallenge(headers: Record<string, string>): boolean {
-  return 'cf-mitigated' in headers || /cloudflare/i.test(headers['server'] ?? '');
+  return headers['cf-mitigated'] === 'challenge';
 }
 
 const SITE_DOWN_WAIT = 10 * 60_000;

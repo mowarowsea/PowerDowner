@@ -96,7 +96,8 @@ test('移動先が同一サイト扱いに足されたら、そのドメイン�
 
 test('Cloudflare の人間判定 (403) とサイトの拒否 (nginx の 403) を見分ける', () => {
   assert.equal(isCloudflareChallenge({ server: 'cloudflare', 'cf-mitigated': 'challenge' }), true);
-  assert.equal(isCloudflareChallenge({ server: 'cloudflare' }), true);
+  // Cloudflare 越しの nginx の 403 (dailyuploads)。server だけでは人間判定と決めない
+  assert.equal(isCloudflareChallenge({ server: 'cloudflare', 'cf-ray': 'a3fa89c86be7260d-NRT' }), false);
   assert.equal(isCloudflareChallenge({ server: 'nginx' }), false);
   assert.equal(isCloudflareChallenge({}), false);
 });
