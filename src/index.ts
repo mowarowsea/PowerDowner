@@ -27,7 +27,7 @@ async function main(): Promise<void> {
     onLinkIds: (id: string, ids: number[]) => queue?.onLinkIds(id, ids),
     onNeedsBrowser: (id: string, reason: string) => queue?.onNeedsBrowser(id, reason),
     onHostLimited: (id: string, reason: string) => queue?.onHostLimited(id, reason),
-    onSiteWait: (id: string, at: number, reason: string) => queue?.onSiteWait(id, at, reason),
+    onSiteWait: (id: string, at: number, reason: string) => queue?.onSiteWait(id, at, reason) ?? false,
     onHandoff: (id: string, r: ResolvedDownload) => queue?.onHandoff(id, r),
   };
   const aria2 = new Aria2Engine(cfg, cbs);

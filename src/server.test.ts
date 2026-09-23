@@ -124,6 +124,36 @@ test('別サイトから同じ巻が来たら合流し、ジョブは増えな�
   await app.close();
 });
 
+/**
+ * 同じ巻を別ページで見つけると、DryEyes は区切り文字だけ違うファイル名で 2 件送ってくる。
+ * 1 回の投入の中なので、手元にはまだ 1 件もジョブが無い。
+ */
+test('1 回の投入に同じ巻が 2 件混ざっていても、ジョブは 1 本', async () => {
+  const { app, db, user } = await harness();
+  const res = await app.inject({
+    method: 'POST', url: '/api/jobs',
+    headers: { authorization: `Bearer ${TOKEN}` },
+    payload: {
+      userId: user.id,
+      items: [
+        item('作品名', ['https://a.example/3-5'], { rawText: 'Sakuhin_Mei_v03-05s.rar' }),
+        { ...item('作品名', ['https://c.example/3-5'], { rawText: 'Sakuhin Mei v03-05s.rar' }), sourceKey: 'watch-1:def' },
+        item('作品名', ['https://a.example/6'], { rawText: 'Sakuhin_Mei_v06.rar' }),
+      ],
+    },
+  });
+  const body = res.json();
+  assert.equal(body.created.length, 2, '3-5 巻と 6 巻の 2 本');
+  assert.equal(body.merged.length, 1);
+  assert.equal(body.merged[0].jobId, body.created[0].id);
+  // 投入元が結果を突き合わせられるよう、寄せた方の sourceKey が返る
+  assert.equal(body.merged[0].sourceKey, 'watch-1:def');
+  // 2 件目の URL は 1 本目のミラー候補になっている
+  assert.deepEqual(db.getJob(body.created[0].id)?.meta.mirrors, ['https://c.example/3-5']);
+  assert.equal(db.listJobs().length, 2);
+  await app.close();
+});
+
 test('取得済みの巻は投入されない', async () => {
   const { app, db, user, queue, dest } = await harness();
   const auth = { authorization: `Bearer ${TOKEN}` };
@@ -362,5 +392,30 @@ test('items/check はトークンが無いと 401', async () => {
     payload: { userId: user.id, items: [item('作品名 第3巻', ['https://a.example/3'])] },
   });
   assert.equal(res.statusCode, 401);
+  await app.close();
+});
+
+test('サイト制限待ちになったら、候補が残っていれば待たずに次の候補へ移る', async () => {
+  const { app, db, queue, user } = await harness();
+  const res = await app.inject({
+    method: 'POST', url: '/api/jobs',
+    headers: { authorization: `Bearer ${TOKEN}` },
+    payload: { userId: user.id, items: [item('作品名 第4巻', ['https://a.example/4', 'https://b.example/4'])] },
+  });
+  const jobId = res.json().created[0].id;
+
+  // 候補が残っている → 移して true (エンジンはジョブを手放す)
+  assert.equal(queue.onSiteWait(jobId, Date.now() + 600_000, 'サイト側が応答しません (HTTP 521)'), true);
+  const moved = db.getJob(jobId)!;
+  assert.equal(moved.url, 'https://b.example/4');
+  assert.deepEqual(moved.meta.mirrors, []);
+  // 見送った候補は tried に落とす。末尾へ回すと全候補が待ちのとき巡回し続ける
+  assert.deepEqual((moved.meta.tried as { url: string }[]).map((t) => t.url), ['https://a.example/4']);
+
+  // 最後の候補 → 従来どおり待つ
+  assert.equal(queue.onSiteWait(jobId, Date.now() + 600_000, 'サイト側が応答しません (HTTP 521)'), false);
+  const waiting = db.getJob(jobId)!;
+  assert.equal(waiting.status, 'waiting_site');
+  assert.equal(waiting.url, 'https://b.example/4');
   await app.close();
 });

@@ -428,7 +428,18 @@ export class Queue {
       .filter(Boolean);
   }
 
-  onSiteWait = (jobId: string, resumeAt: number, reason: string): void => {
+  /**
+   * サイトの制限やサイト落ちで待たされる。まだ試していない候補があれば、待たずにそちらへ移す
+   * (待ちが明けるのを繰り返し待つより、次の候補で落ちる方が早い)。
+   * 移した候補は tried に落とす。末尾に回すと全候補が待ちのときに候補間を延々と巡回するため。
+   * 最後の候補なら従来どおり待つ。移したら true を返し、エンジンはこのジョブを手放す
+   */
+  onSiteWait = (jobId: string, resumeAt: number, reason: string): boolean => {
+    const cur = this.db.getJob(jobId);
+    if (!cur) return false;
+    // 待ちは失敗ではないので実績の fail には数えない
+    if (this.toNextMirror(cur, `待ちになったので次の候補へ (${reason})`)) return true;
+
     const at = new Date(resumeAt);
     const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
     this.emit(this.db.patchJob(jobId, {
@@ -436,6 +447,7 @@ export class Queue {
       speed: 0,
       meta: { notBefore: resumeAt, waitReason: reason, detail: `${hhmm} に自動で再開 (${reason})`, humanDetail: '' },
     }));
+    return false;
   };
 
   onLinkIds = (jobId: string, linkIds: number[]): void => {
@@ -613,6 +625,8 @@ export class Queue {
 
     const result: AddItemsResult = { created: [], merged: [], skipped: [], invalid: [], rejected: [], truncated };
     const hosters = this.db.listHosters();
+    /** 同じ投入の中で合流させるための対応。投入の index → 作ったジョブ */
+    const createdIds = new Map<number, string>();
 
     // 所持の判定はまとめて 1 回で聞く。20 件の投入で棚を 20 回叩く理由が無い。
     // URL が無効な件も混ざるが、聞く相手が増えるわけではないので選り分けない
@@ -659,9 +673,16 @@ export class Queue {
         continue;
       }
 
-      // 合流先が消えていた場合は new として落とす
-      if (decision.kind === 'merge' && this.mergeIntoJob(decision.jobId, usable, item.source ?? null)) {
-        result.merged.push({ jobId: decision.jobId, sourceKey, title: label, urls: usable });
+      // 合流先が消えていた場合は new として落とす。mergeBatch は同じ投入の中の
+      // 先行 1 件が相手なので、それが URL 無効などで作られていなければ同じく new
+      const mergeTo =
+        decision.kind === 'merge'
+          ? decision.jobId
+          : decision.kind === 'mergeBatch'
+            ? createdIds.get(decision.index) ?? null
+            : null;
+      if (mergeTo && this.mergeIntoJob(mergeTo, usable, item.source ?? null)) {
+        result.merged.push({ jobId: mergeTo, sourceKey, title: label, urls: usable });
         continue;
       }
 
@@ -687,6 +708,7 @@ export class Queue {
         decision.parsed
       );
       this.db.insertJob(job);
+      createdIds.set(index, job.id);
 
       result.created.push(job);
       this.emit(job);

@@ -36,7 +36,9 @@ export type ItemDecision =
   /** 既に持っているので落とさない */
   | { kind: 'skip'; parsed: ParsedItem; reason: string }
   /** 落とし中のジョブと同じもの。ミラー候補として合流させる */
-  | { kind: 'merge'; parsed: ParsedItem; jobId: string };
+  | { kind: 'merge'; parsed: ParsedItem; jobId: string }
+  /** 同じ投入の中の同じもの。index 番目から作られるジョブへ合流させる */
+  | { kind: 'mergeBatch'; parsed: ParsedItem; index: number };
 
 /**
  * 所持済みの範囲で target を覆えているか調べ、覆えていない巻を返す。
@@ -88,6 +90,8 @@ export async function decideItems(
 
   const askAt: number[] = [];
   const queries: OwnQuery[] = [];
+  /** 同じ投入の中で、先に出た同じものへ寄せる分。i → 寄せ先の index */
+  const twinOf = new Map<number, number>();
 
   for (let i = 0; i < inputs.length; i++) {
     const parsed = parsedAll[i];
@@ -96,6 +100,14 @@ export async function decideItems(
     // 黙って捨てるより、もう一度落ちる方が被害が小さい。
     if (parsed.volumeFrom === null || parsed.volumeTo === null || !parsed.seriesKey) {
       decisions[i] = { kind: 'new', parsed, missing: null };
+      continue;
+    }
+
+    // 同じ投入の中の重なりを先に潰す。この時点ではまだ 1 件もジョブになっていないので、
+    // 手元の jobs を見る decideFromJobs では気付けない
+    const twin = findTwinInBatch(parsedAll, twinOf, i);
+    if (twin !== null) {
+      twinOf.set(i, twin);
       continue;
     }
 
@@ -137,7 +149,45 @@ export async function decideItems(
       : { kind: 'new', parsed, missing: answer?.missing ?? null };
   }
 
+  // 寄せた分を、寄せ先の決定に合わせて畳む。寄せ先が落ちないと決まったなら
+  // (所持済み・既存ジョブへ合流) こちらも同じ扱いにする — 片方だけ新規で落とすと畳んだ意味が無い
+  for (const [i, root] of twinOf) {
+    const parsed = parsedAll[i];
+    const base = decisions[root]!;
+    decisions[i] =
+      base.kind === 'skip'
+        ? { kind: 'skip', parsed, reason: base.reason }
+        : base.kind === 'merge'
+          ? { kind: 'merge', parsed, jobId: base.jobId }
+          : { kind: 'mergeBatch', parsed, index: root };
+  }
+
   return decisions as ItemDecision[];
+}
+
+/**
+ * 同じ投入の中で、先に出た同じものを探す。無ければ null。
+ *
+ * 同じ巻を別ページで見つけると、DryEyes は区切り文字だけ違うファイル名で 2 件送ってくる
+ * (`Haipa_Infureshon_v03-05s.rar` と `Haipa Infureshon v03-05s.rar`)。seriesKey は
+ * 記号と空白を落としてあるので既に同じキーになっていて、あとはこの投入の中で
+ * 突き合わせるだけでいい。
+ *
+ * 範囲は**完全に同じものだけ**畳む。手元のジョブとの合流 (decideFromJobs) は重なりで
+ * 判定するが、同じ投入の中に 1-3 巻と 3-5 巻が並ぶのは分割セットが両方公開されている
+ * 時で、重なりで畳むと 4,5 巻が落ちてこない。
+ */
+function findTwinInBatch(parsedAll: ParsedItem[], twinOf: Map<number, number>, i: number): number | null {
+  const me = parsedAll[i];
+  for (let j = 0; j < i; j++) {
+    // 既に誰かへ寄せたものは飛ばす。3 件以上同じものが来ても寄せ先は先頭の 1 件
+    if (twinOf.has(j)) continue;
+    const other = parsedAll[j];
+    if (other.seriesKey !== me.seriesKey) continue;
+    if (other.volumeFrom !== me.volumeFrom || other.volumeTo !== me.volumeTo) continue;
+    return j;
+  }
+  return null;
 }
 
 /**

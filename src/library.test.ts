@@ -261,3 +261,81 @@ test('答えは投入と同じ並びで返る', async () => {
   assert.deepEqual(decisions.map((d) => d.kind), ['skip', 'new', 'skip']);
   await shelf.close();
 });
+
+// ---- 同じ投入の中の重なり --------------------------------------------------
+
+/**
+ * 同じ巻を別ページで見つけると、DryEyes は区切り文字だけ違うファイル名で 2 件送ってくる。
+ * 1 回の投入の中なので手元にはまだ 1 件もジョブが無く、`decideFromJobs` では気付けない。
+ */
+test('同じ投入の中の同じ巻は 1 件目へ寄せる', async () => {
+  const shelf = await fakeShelf({});
+  const decisions = await decideItems(tmpDb(), shelf.cfg, USER, [
+    item({ title: '作品名', rawText: 'Sakuhin_Mei_v03-05s.rar' }),
+    item({ title: '作品名', rawText: 'Sakuhin Mei v03-05s.rar' }),
+    item({ title: '作品名', rawText: 'Sakuhin_Mei_v06.rar' }),
+  ]);
+  assert.deepEqual(decisions.map((d) => d.kind), ['new', 'mergeBatch', 'new']);
+  const second = decisions[1];
+  assert.equal(second.kind === 'mergeBatch' ? second.index : null, 0);
+  assert.deepEqual(shelf.calls, [2], '寄せた分は棚にも聞かない');
+  await shelf.close();
+});
+
+test('タイトルがファイル名しか無くても、区切り文字だけの違いは寄せる', async () => {
+  const shelf = await fakeShelf({});
+  const decisions = await decideItems(tmpDb(), shelf.cfg, USER, [
+    item({ rawText: 'Haipa_Infureshon_v03-05s.rar' }),
+    item({ rawText: 'Haipa Infureshon v03-05s.rar' }),
+  ]);
+  assert.deepEqual(decisions.map((d) => d.kind), ['new', 'mergeBatch']);
+  await shelf.close();
+});
+
+/**
+ * 手元のジョブとの合流は重なりで判定するが、同じ投入の中に並ぶ 1-3 巻と 3-5 巻は
+ * 分割セットが両方公開されている時で、寄せると 4,5 巻が落ちてこない。
+ */
+test('範囲が違えば寄せない (1-3巻 と 3-5巻 は別のファイル)', async () => {
+  const shelf = await fakeShelf({});
+  const decisions = await decideItems(tmpDb(), shelf.cfg, USER, [
+    item({ title: '作品名 第1-3巻' }),
+    item({ title: '作品名 第3-5巻' }),
+  ]);
+  assert.deepEqual(decisions.map((d) => d.kind), ['new', 'new']);
+  await shelf.close();
+});
+
+test('3 件同じなら全部 1 件目へ寄せる', async () => {
+  const shelf = await fakeShelf({});
+  const decisions = await decideItems(tmpDb(), shelf.cfg, USER, [
+    item({ title: '作品名 第3巻' }),
+    item({ title: '作品名 第3巻' }),
+    item({ title: '作品名 第3巻' }),
+  ]);
+  assert.deepEqual(decisions.map((d) => (d.kind === 'mergeBatch' ? d.index : d.kind)), ['new', 0, 0]);
+  assert.deepEqual(shelf.calls, [1], '棚に聞くのも 1 件分だけ');
+  await shelf.close();
+});
+
+test('寄せ先が所持済みなら、寄せた方もスキップ', async () => {
+  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] });
+  const decisions = await decideItems(tmpDb(), shelf.cfg, USER, [
+    item({ title: '作品名 第3巻' }),
+    item({ title: '作品名 第3巻' }),
+  ]);
+  assert.deepEqual(decisions.map((d) => d.kind), ['skip', 'skip']);
+  await shelf.close();
+});
+
+test('寄せ先が既存ジョブへ合流するなら、寄せた方も同じジョブへ', async () => {
+  const db = tmpDb();
+  const job = putJob(db, { status: 'downloading' });
+  const shelf = await fakeShelf({});
+  const decisions = await decideItems(db, shelf.cfg, USER, [
+    item({ title: '作品名 第3巻' }),
+    item({ title: '作品名 第3巻' }),
+  ]);
+  assert.deepEqual(decisions.map((d) => (d.kind === 'merge' ? d.jobId : d.kind)), [job.id, job.id]);
+  await shelf.close();
+});

@@ -29,8 +29,11 @@ export interface BrowserCallbacks {
   onDone(jobId: string, filename: string | null): void;
   onFailed(jobId: string, error: string): void;
   onWaitingHuman(jobId: string, waiting: boolean, detail: string): void;
-  /** サイト側の無料ダウンロード間隔にかかった。resumeAt (epoch ms) に自動で再開する */
-  onSiteWait(jobId: string, resumeAt: number, reason: string): void;
+  /**
+   * サイト側の無料ダウンロード間隔にかかった / サイトが落ちている。resumeAt (epoch ms) に自動で再開する。
+   * キューが別の候補へ移した場合は true を返す。そのときエンジンはこのジョブを待たずに手放す
+   */
+  onSiteWait(jobId: string, resumeAt: number, reason: string): boolean;
 }
 
 interface Current {
@@ -298,12 +301,12 @@ export class BrowserEngine {
     if (!this.available) throw new Error(`ブラウザが利用できません: ${this.detail}`);
     // 再起動をまたいでもサイト制限待ちを守る
     const notBefore = typeof job.meta.notBefore === 'number' ? job.meta.notBefore : 0;
-    this.waiting.push({ job, base: baseDomainOf(new URL(job.url).hostname), notBefore, attempts: 0 });
     if (notBefore > Date.now()) {
       // 再起動で downloading に戻っているので、待ち状態を理由ごと復元する
       const why = typeof job.meta.waitReason === 'string' && job.meta.waitReason ? job.meta.waitReason : 'サイトの無料ダウンロード間隔';
-      this.cb.onSiteWait(job.id, notBefore, why);
+      if (this.cb.onSiteWait(job.id, notBefore, why)) return; // 別の候補へ移された
     }
+    this.waiting.push({ job, base: baseDomainOf(new URL(job.url).hostname), notBefore, attempts: 0 });
     await this.next();
   }
 
@@ -655,8 +658,8 @@ export class BrowserEngine {
       case 'wait': {
         const resumeAt = Date.now() + result.ms + 15_000;
         log(`[browser] ${job.id}: 制限待ち ${Math.round(result.ms / 60000)} 分 (${result.reason})`);
-        this.cb.onSiteWait(job.id, resumeAt, result.reason);
         this.finish(cur);
+        if (this.cb.onSiteWait(job.id, resumeAt, result.reason)) return; // 別の候補へ移された
         this.waiting.push({ job: { ...job, meta: { ...job.meta, notBefore: resumeAt } }, base: cur.base, notBefore: resumeAt, attempts: 0 });
         this.next().catch(() => { /* ignore */ });
         return;
@@ -679,8 +682,8 @@ export class BrowserEngine {
     }
     const resumeAt = Date.now() + SITE_DOWN_WAIT;
     log(`[browser] ${cur.job.id}: ${reason} → ${SITE_DOWN_WAIT / 60_000} 分後に再試行 (${tries}/${SITE_DOWN_RETRIES})`);
-    this.cb.onSiteWait(cur.job.id, resumeAt, reason);
     this.finish(cur);
+    if (this.cb.onSiteWait(cur.job.id, resumeAt, reason)) return; // 別の候補へ移された
     this.waiting.push({
       job: { ...cur.job, meta: { ...cur.job.meta, notBefore: resumeAt } },
       base: cur.base, notBefore: resumeAt, attempts: tries,
