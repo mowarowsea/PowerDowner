@@ -79,6 +79,11 @@ interface Waiting {
 }
 
 /** サイト側が落ちている (Cloudflare 5xx など) ときの再試行間隔と回数 */
+/** Cloudflare の人間判定ページか。403 でも、これはサイトに拒否されたのではなく「解けば通る」 */
+export function isCloudflareChallenge(headers: Record<string, string>): boolean {
+  return 'cf-mitigated' in headers || /cloudflare/i.test(headers['server'] ?? '');
+}
+
 const SITE_DOWN_WAIT = 10 * 60_000;
 const SITE_DOWN_RETRIES = 6;
 
@@ -535,6 +540,14 @@ export class BrowserEngine {
       // 人間にもどうにもならないので、手動モードに落とさず時間を置いて自分で試し直す。
       const code = res?.status() ?? 0;
       if (code >= 500) { this.retryLater(cur, `サイト側が応答しません (HTTP ${code})`); return; }
+      if (code === 429) { this.retryLater(cur, `アクセスが多すぎると断られました (HTTP ${code})`); return; }
+      // 403/404/410 などはファイルが消えたか締め出されている。人間が操作しても進まないので、
+      // 手動モードに落とさず失敗にする (候補が残っていれば次のミラーへ回る)。
+      // ただし Cloudflare の人間判定も 403 で返るので、それはドライバ (人間判定の処理) へ回す
+      if (code >= 400 && !isCloudflareChallenge(res!.headers())) {
+        this.fail(job.id, `サイトに拒否されました (HTTP ${code})`);
+        return;
+      }
       // ドライバは長時間走るので待たない。枠は this.current に確保済み。
       this.runDriver(cur).catch((e) => {
         if (!cur.handled) this.fail(job.id, `自動操作でエラー: ${(e as Error).message.split('\n')[0]}`);

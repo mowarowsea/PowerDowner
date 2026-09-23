@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { adUrlRe, popupGuardScript, listedHost, blocksNavigation } from './engines/browser.js';
+import { adUrlRe, popupGuardScript, listedHost, blocksNavigation, isCloudflareChallenge } from './engines/browser.js';
 
 /**
  * popupGuardScript をブラウザの外で動かす。
@@ -92,4 +92,11 @@ test('移動先が同一サイト扱いに足されたら、そのドメイン�
   // frdl.io → frdl.hk のように bases が増えていく作り
   assert.ok(blocksNavigation('https://frdl.hk/x', ['frdl.io']));
   assert.ok(!blocksNavigation('https://frdl.hk/x', ['frdl.io', 'frdl.hk']));
+});
+
+test('Cloudflare の人間判定 (403) とサイトの拒否 (nginx の 403) を見分ける', () => {
+  assert.equal(isCloudflareChallenge({ server: 'cloudflare', 'cf-mitigated': 'challenge' }), true);
+  assert.equal(isCloudflareChallenge({ server: 'cloudflare' }), true);
+  assert.equal(isCloudflareChallenge({ server: 'nginx' }), false);
+  assert.equal(isCloudflareChallenge({}), false);
 });

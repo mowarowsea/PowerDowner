@@ -153,6 +153,9 @@ export class Queue {
     const cur = this.db.getJob(jobId);
     if (!cur || (cur.status !== 'downloading' && cur.status !== 'waiting_human' && cur.status !== 'waiting_site')) return;
     const patch: Partial<Job> = { bytesTotal: p.bytesTotal, bytesDone: p.bytesDone, speed: p.speed };
+    // 制限待ちが明けてエンジンが再び動き出した。downloading に戻さないと、
+    // この先の人間待ち (onWaitingHuman) が状態の条件で弾かれて、黙って止まる
+    if (cur.status === 'waiting_site' && !(Number(cur.meta.notBefore) > Date.now())) patch.status = 'downloading';
     if (p.filename && p.filename !== cur.filename) patch.filename = p.filename;
     if (p.detail !== undefined && p.detail !== cur.meta.detail) patch.meta = { detail: p.detail };
     this.emit(this.db.patchJob(jobId, patch));
