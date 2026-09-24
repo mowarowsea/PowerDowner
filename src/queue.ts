@@ -583,7 +583,7 @@ export class Queue {
   private async handoff(jobId: string, resolved: ResolvedDownload): Promise<void> {
     const job = this.db.getJob(jobId);
     if (!job) return;
-    if (!this.aria2.available) throw new Error(`aria2 が利用できません: ${this.aria2.detail}`);
+    if (!(await this.aria2.ready())) throw new Error(`aria2 が利用できません: ${this.aria2.detail}`);
     const gid = await this.aria2.add({ ...job, engine: 'aria2' }, resolved);
     this.emit(this.db.patchJob(jobId, {
       status: 'downloading', engine: 'aria2', externalId: gid,
@@ -1039,7 +1039,7 @@ export class Queue {
     try {
       const route = await this.router.resolve(job);
       if (route.engine === 'aria2') {
-        if (!this.aria2.available) throw new Error(`aria2 が利用できません: ${this.aria2.detail}`);
+        if (!(await this.aria2.ready())) throw new Error(`aria2 が利用できません: ${this.aria2.detail}`);
         const r = route.resolved!;
         const gid = await this.aria2.add({ ...job, engine: 'aria2' }, r);
         this.emit(this.db.patchJob(job.id, {

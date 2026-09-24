@@ -335,7 +335,9 @@
       p.fav.title = host;
     }
 
-    p.title.textContent = job.filename || job.url;
+    // CivitAI は再試行でファイル名が消えても、何のモデルかはモデル名で分かるようにする
+    const civ = job.meta && job.meta.civitai;
+    p.title.textContent = job.filename || (civ ? `${civ.modelName} / ${civ.versionName}` : job.url);
     p.title.title = job.url;
 
     p.host.textContent = host;

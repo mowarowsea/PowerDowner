@@ -177,25 +177,63 @@ export class Aria2Engine {
     this.setStatus(false, 'aria2 RPC に接続できません');
   }
 
+  private reconnecting: Promise<void> | null = null;
+
+  /**
+   * 接続が切れた後のつなぎ直し。同時に何度呼ばれても 1 本にまとめる。
+   * 20 秒でつながらなければ、生き残っているのが応答しない aria2 だとみなして起動し直す。
+   * 追いかけていた GID はそのまま残るので、つながり直せば poll が進捗と完了を拾い直す
+   */
+  private reconnect(): Promise<void> {
+    this.reconnecting ??= (async () => {
+      try {
+        await this.connect();
+        if (this.ws || this.stopping) return;
+        log('[aria2] つなぎ直せないので aria2 を起動し直します');
+        this.adopted = false;
+        if (this.proc && this.proc.exitCode === null) {
+          this.proc.kill();   // exit の側が起動し直して connect する
+        } else if (fs.existsSync(this.cfg.aria2.exe)) {
+          this.spawnProcess();
+          await this.connect();
+        }
+      } finally {
+        this.reconnecting = null;
+      }
+    })();
+    return this.reconnecting;
+  }
+
+  /**
+   * 渡す直前の確認。切れていたらつなぎ直しを待つ。
+   * 接続が一瞬切れただけでジョブを失敗にしない (失敗にすると人が再試行を押すまで止まる)
+   */
+  async ready(): Promise<boolean> {
+    if (this.ws && this.ws.readyState === 1) return true;
+    if (this.stopping) return false;
+    await Promise.race([this.reconnect(), sleep(25_000)]);
+    return !!this.ws && this.ws.readyState === 1;
+  }
+
   private openWs(url: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       ws.onopen = () => { this.ws = ws; resolve(); };
       ws.onerror = () => reject(new Error('ws error'));
-      ws.onclose = () => {
-        if (this.ws === ws) this.ws = null;
+      ws.onclose = (ev) => {
+        const live = this.ws === ws;
+        if (live) this.ws = null;
         for (const p of this.pending.values()) p.reject(new Error('aria2 接続が切れました'));
         this.pending.clear();
-        // 引き継いだ外部プロセスが消えた場合は、自前で起動し直す
-        if (this.adopted && !this.stopping) {
-          this.adopted = false;
-          this.setStatus(false, '引き継いだ aria2 が終了しました。再起動します');
-          setTimeout(() => {
-            if (!fs.existsSync(this.cfg.aria2.exe)) return;
-            this.spawnProcess();
-            this.connect().catch(() => { /* ignore */ });
-          }, 1000);
-        }
+        if (!live || this.stopping) return;
+
+        // 自前で起動したプロセスごと落ちた場合は、spawnProcess の exit が起動し直すので触らない
+        if (this.proc && this.proc.exitCode !== null) return;
+        // それ以外は、まずつなぎ直す。接続だけが切れて aria2 は生きていることがあり、
+        // 放っておくと緑のまま一切受け付けなくなる (2026-09-24 に実際に起きた)。
+        // 引き継いだプロセスが本当に消えていたら、つなぎ直しに失敗した先で起動し直す
+        this.setStatus(false, `aria2 との接続が切れました (code ${ev.code})。つなぎ直します`);
+        this.reconnect().catch(() => { /* ignore */ });
       };
       ws.onmessage = (ev) => this.onMessage(String(ev.data));
     });
