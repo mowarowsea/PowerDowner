@@ -37,7 +37,12 @@ export class Router {
 
     if (isCivitaiUrl(u)) {
       const token = this.db.getSetting('civitai_token');
-      const resolved = await resolveCivitai(u, token);
+      // 確認カードから来たジョブは、カードで選んだバージョンとファイルを落とす
+      const c = job.meta.civitai as { versionId?: number; fileId?: number } | undefined;
+      const pick = c && Number.isInteger(c.versionId) && Number.isInteger(c.fileId)
+        ? { versionId: c.versionId!, fileId: c.fileId! }
+        : null;
+      const resolved = await resolveCivitai(u, token, pick);
       return { engine: 'aria2', resolved };
     }
 

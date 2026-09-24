@@ -14,6 +14,7 @@ import { hostOf, pickFreeHostMirror, sortByPriority } from './mirrors.js';
 import { hosterKeyOf, newHosterFor, priorityDomains, splitByEnabled } from './hosters.js';
 import { bus, log } from './events.js';
 import { toast } from './notify.js';
+import { relToRoot, savePreview } from './models.js';
 
 /**
  * 中身が HTML かどうか。頭だけ読んで判断する。
@@ -82,6 +83,46 @@ export interface AddItemsResult {
   rejected: { sourceKey: string | null; title: string | null; reason: string; hosters: string[] }[];
   /** 上限で切り捨てた件数 */
   truncated: number;
+}
+
+/** 確認カードから投入する CivitAI の 1 セット (モデル + プレビュー画像) */
+export interface AddCivitaiInput {
+  userId: number;
+  /** 保存先の絶対パス。カードで選んだフォルダを解決済みで渡す */
+  dir: string;
+  host: string;
+  modelId: number;
+  modelName: string;
+  type: string;
+  versionId: number;
+  versionName: string;
+  baseModel: string;
+  fileId: number;
+  fileName: string;
+  bytes: number;
+  /** 原寸の画像 URL。null なら画像は落とさない */
+  imageUrl: string | null;
+  thumb: string | null;
+}
+
+/** jobs.meta.civitai に焼く中身。落とす物を投入時に決めて、以後は動かさない */
+export interface CivitaiMeta {
+  modelId: number;
+  modelName: string;
+  type: string;
+  versionId: number;
+  versionName: string;
+  baseModel: string;
+  fileId: number;
+  imageUrl: string | null;
+  thumb: string | null;
+}
+
+/** jobs.meta.preview。モデルが落ちた後に付ける画像の状況 */
+export interface PreviewMeta {
+  state: 'pending' | 'saving' | 'ok' | 'failed' | 'none';
+  file?: string;
+  error?: string;
 }
 
 /**
@@ -176,7 +217,10 @@ export class Queue {
       return;
     }
 
-    const finalName = verdict.path ? this.relocate(cur, verdict.path) : name;
+    // CivitAI のモデルは名前を変えない。元の名前がトリガーワードの手がかりになり、
+    // 作品・巻の命名 (naming.ts) はそもそも当てはまらない
+    const civitai = cur.meta.civitai as CivitaiMeta | undefined;
+    const finalName = civitai ? name : verdict.path ? this.relocate(cur, verdict.path) : name;
 
     const job = this.db.patchJob(jobId, {
       status: 'done',
@@ -198,7 +242,57 @@ export class Queue {
     // 棚 (pinax) に載るのは次のスキャンからなので、それまではこのジョブが弾く
     log(`[queue] 完了: ${job?.filename ?? cur.url} (${verdict.size} B)`);
     this.emit(job);
+
+    // モデルが揃ってから画像を付ける。先に置くと、モデル側が同名回避で ` (2)` になった時に
+    // 名前がずれて、Forge がプレビューとして拾わない
+    if (civitai && job) this.attachPreview(job.id).catch((e) => log(`[queue] 画像の保存でエラー: ${(e as Error).message}`));
   };
+
+  /**
+   * CivitAI のジョブに、モデルと同じ名前のプレビュー画像を置く。
+   *
+   * **画像が駄目でもジョブは完了のまま。** 何 GB もあるモデルを画像 1 枚のために
+   * 失敗扱いにしない。代わりに meta.preview に失敗を残し、画面から画像だけ取り直せるようにする。
+   */
+  private async attachPreview(jobId: string): Promise<void> {
+    const job = this.db.getJob(jobId);
+    const c = job?.meta.civitai as CivitaiMeta | undefined;
+    if (!job || !c) return;
+    if (!c.imageUrl) {
+      this.emit(this.db.patchJob(jobId, { meta: { preview: { state: 'none' } satisfies PreviewMeta } }));
+      return;
+    }
+    if (!job.filename) {
+      this.emit(this.db.patchJob(jobId, { meta: { preview: { state: 'failed', error: 'モデルのファイル名が分からないので画像の名前を決められません' } satisfies PreviewMeta } }));
+      return;
+    }
+    // 実ファイルの在りかを探す。aria2 は保存先の直下に置くので、まずそこを見る
+    const modelPath = this.findDownloaded(job.destDir, job.filename);
+    const dir = modelPath ? path.dirname(modelPath) : job.destDir;
+
+    this.emit(this.db.patchJob(jobId, { meta: { preview: { state: 'saving' } satisfies PreviewMeta } }));
+    try {
+      const file = await savePreview(c.imageUrl, dir, job.filename);
+      log(`[queue] 画像を保存: ${path.join(dir, file)}`);
+      this.emit(this.db.patchJob(jobId, { meta: { preview: { state: 'ok', file } satisfies PreviewMeta } }));
+    } catch (e) {
+      const error = (e as Error).message;
+      log(`[queue] 画像を保存できませんでした: ${job.filename} (${error})`);
+      this.emit(this.db.patchJob(jobId, { meta: { preview: { state: 'failed', error } satisfies PreviewMeta } }));
+    }
+  }
+
+  /** 画像だけ取り直す。モデルは落とし直さない */
+  retryPreview(id: string): Job {
+    const job = this.db.getJob(id);
+    if (!job) throw new HttpError(404, 'ジョブがありません');
+    if (!job.meta.civitai) throw new HttpError(400, 'CivitAI のジョブではありません');
+    if (job.status !== 'done') throw new HttpError(400, 'モデルが落ち終わってから取り直してください');
+    const next = this.db.patchJob(id, { meta: { preview: { state: 'pending' } satisfies PreviewMeta } });
+    this.emit(next);
+    this.attachPreview(id).catch((e) => log(`[queue] 画像の保存でエラー: ${(e as Error).message}`));
+    return next!;
+  }
 
   /**
    * 落ちてきたものが本物か確かめる。
@@ -609,6 +703,58 @@ export class Queue {
     }
     this.schedulePump();
     return { jobs, skipped, rejected };
+  }
+
+  /**
+   * 確認カードからの CivitAI 投入。モデル 1 ファイル + プレビュー画像 1 枚で 1 ジョブ。
+   * 同じファイルを落としている最中なら重ねない (完了済みは、消して入れ直したい場合があるので通す)。
+   */
+  addCivitai(input: AddCivitaiInput): Job {
+    const user = this.db.getUser(input.userId);
+    if (!user) throw new HttpError(400, 'ユーザーが存在しません');
+    if (!path.isAbsolute(input.dir)) throw new HttpError(400, `保存先は絶対パスで指定してください: ${input.dir}`);
+    try {
+      fs.mkdirSync(input.dir, { recursive: true });
+    } catch (e) {
+      throw new HttpError(400, `保存先フォルダを作成できません: ${input.dir} (${(e as Error).message})`);
+    }
+
+    const active = this.db
+      .listJobsByStatus(['queued', 'resolving', 'downloading', 'waiting_human', 'waiting_site'])
+      .find((j) => {
+        const c = j.meta.civitai as CivitaiMeta | undefined;
+        return c && c.versionId === input.versionId && c.fileId === input.fileId;
+      });
+    if (active) throw new HttpError(409, `同じファイルを落としている最中です: ${active.filename ?? input.fileName}`);
+
+    const url = `https://${input.host}/models/${input.modelId}?modelVersionId=${input.versionId}`;
+    const civitai: CivitaiMeta = {
+      modelId: input.modelId,
+      modelName: input.modelName,
+      type: input.type,
+      versionId: input.versionId,
+      versionName: input.versionName,
+      baseModel: input.baseModel,
+      fileId: input.fileId,
+      imageUrl: input.imageUrl,
+      thumb: input.thumb,
+    };
+    const job = this.newJob(user.id, url, input.dir, {
+      civitai,
+      preview: { state: input.imageUrl ? 'pending' : 'none' } satisfies PreviewMeta,
+    });
+    // 解決前から名前と大きさを出しておく。URL のままだと何のモデルか分からない
+    job.filename = input.fileName;
+    job.bytesTotal = input.bytes;
+    this.db.insertJob(job);
+
+    // 次のカードの初期値にする。根の中なら相対で覚えて、根を移しても効くようにする
+    this.db.setSetting(`civitai_last_dir:${input.type.toLowerCase()}`, relToRoot(this.db.getSetting('civitai_models_root'), input.dir));
+
+    log(`[queue] CivitAI: ${input.modelName} / ${input.versionName} -> ${input.dir}`);
+    this.emit(job);
+    this.schedulePump();
+    return job;
   }
 
   /**

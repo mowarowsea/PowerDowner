@@ -15,6 +15,8 @@ import type { Job, EngineStatus } from './types.js';
 import { parseItem, seriesKeyOf } from './volume.js';
 import { decideItems, type ItemInput } from './library.js';
 import type { CaptchaNotice, RejectedNotice } from './events.js';
+import { inspectCivitai, isCivitaiUrl } from './resolvers/civitai.js';
+import { findExisting, guessDir, listCandidates, resolveModelDir } from './models.js';
 
 interface Deps {
   cfg: Config;
@@ -87,7 +89,10 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     jobs: db.listJobs({ limit: 300 }),
     engines: [aria2.status(), jd2.status(), browser.status()],
     hosters: db.listHosters(),
-    settings: { civitaiToken: mask(db.getSetting('civitai_token')) },
+    settings: {
+      civitaiToken: mask(db.getSetting('civitai_token')),
+      civitaiModelsRoot: db.getSetting('civitai_models_root'),
+    },
   });
 
   app.get('/api/state', async () => state());
@@ -325,10 +330,79 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     };
   });
 
+  // ---- CivitAI (確認カード) ------------------------------------------------
+  // 貼られた URL を下調べして、カードに並べる材料 (バージョン・ファイル・画像・保存先の候補) を返す。
+  // 投入はカードで人間が決めた後に別の口で受ける
+
+  const civitaiUrl = (raw: unknown): URL => {
+    let u: URL;
+    try { u = new URL(String(raw ?? '').trim()); } catch { throw new HttpError(400, 'URL として解釈できません'); }
+    if (!isCivitaiUrl(u)) throw new HttpError(400, `CivitAI の URL ではありません: ${u.hostname}`);
+    return u;
+  };
+
+  const inspect = async (u: URL) => {
+    try {
+      return await inspectCivitai(u, db.getSetting('civitai_token'));
+    } catch (e) {
+      throw new HttpError(502, (e as Error).message);
+    }
+  };
+
+  app.get<{ Querystring: { url?: string } }>('/api/civitai/inspect', async (req) => {
+    const info = await inspect(civitaiUrl(req.query.url));
+    const root = db.getSetting('civitai_models_root');
+    const candidates = root ? listCandidates(root, info.type) : [];
+    const lastUsed = db.getSetting(`civitai_last_dir:${info.type.toLowerCase()}`);
+    // 当たりはバージョンごと。同じモデルでも v1 は SDXL、v2 は Pony ということがある
+    const suggested = Object.fromEntries(
+      info.versions.map((v) => [v.id, guessDir(candidates, { tags: info.tags, baseModel: v.baseModel, lastUsed })]),
+    );
+    const names = [...new Set(info.versions.flatMap((v) => v.files.map((f) => f.name)))];
+    const existing = root ? findExisting(root, info.type, names) : {};
+    return { info, root, candidates, suggested, lastUsed, existing };
+  });
+
+  app.post<{
+    Body: { userId?: number; url?: string; versionId?: number; fileId?: number; imageUrl?: string | null; dir?: string };
+  }>('/api/civitai/jobs', async (req, reply) => {
+    const b = req.body ?? {};
+    const userId = requireUser(b.userId);
+    // カードの中身は信じず、もう一度引いて突き合わせる。古いカードから別のファイルを落とさないため
+    const info = await inspect(civitaiUrl(b.url));
+    const v = info.versions.find((x) => x.id === Number(b.versionId));
+    if (!v) throw new HttpError(400, '選んだバージョンが見つかりません');
+    const f = v.files.find((x) => x.id === Number(b.fileId));
+    if (!f) throw new HttpError(400, '選んだファイルが見つかりません');
+    const imageUrl = b.imageUrl ? String(b.imageUrl) : null;
+    const image = imageUrl ? v.images.find((i) => i.url === imageUrl) : null;
+    if (imageUrl && !image) throw new HttpError(400, '選んだ画像がこのバージョンにありません');
+
+    let dir: string;
+    try {
+      dir = resolveModelDir(db.getSetting('civitai_models_root'), String(b.dir ?? ''));
+    } catch (e) {
+      throw new HttpError(400, (e as Error).message);
+    }
+
+    const job = queue.addCivitai({
+      userId, dir, host: info.host,
+      modelId: info.modelId, modelName: info.name, type: info.type,
+      versionId: v.id, versionName: v.name, baseModel: v.baseModel,
+      fileId: f.id, fileName: f.name, bytes: f.bytes,
+      imageUrl: image?.url ?? null, thumb: image?.thumb ?? null,
+    });
+    reply.status(201);
+    return { job };
+  });
+
+  app.post<{ Params: { id: string } }>('/api/jobs/:id/preview', async (req) => queue.retryPreview(req.params.id));
+
   // ---- settings ---------------------------------------------------------
-  app.put<{ Body: { civitaiToken?: string | null } }>('/api/settings', async (req) => {
+  app.put<{ Body: { civitaiToken?: string | null; civitaiModelsRoot?: string | null } }>('/api/settings', async (req) => {
     const b = req.body ?? {};
     if ('civitaiToken' in b) db.setSetting('civitai_token', b.civitaiToken ? String(b.civitaiToken).trim() : null);
+    if ('civitaiModelsRoot' in b) db.setSetting('civitai_models_root', normalizeDir(b.civitaiModelsRoot));
     return { settings: state().settings };
   });
 

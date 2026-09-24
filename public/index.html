@@ -53,6 +53,17 @@
       <div id="addError" class="error" hidden></div>
     </section>
 
+    <section id="civitBox" class="civit" hidden>
+      <div class="civithead">
+        <h2>CivitAI</h2>
+        <span class="hint small">モデルと、同じ名前のプレビュー画像を 1 セットで保存します</span>
+        <div class="spacer"></div>
+        <label class="toggle"><input type="checkbox" id="civitHideNsfw"> NSFW の画像を候補から外す</label>
+        <button id="btnCivitAll" class="primary small" hidden>まとめて追加</button>
+      </div>
+      <div id="civitCards" class="civitcards"></div>
+    </section>
+
     <section class="card">
       <div class="listhead">
         <h2>ジョブ</h2>
@@ -87,6 +98,14 @@
         <input id="civitaiToken" type="password" placeholder="API キー (空欄で削除)">
         <span id="civitaiTokenState" class="hint"></span>
         <button type="button" id="btnSaveToken" class="primary small">保存</button>
+      </div>
+      <p class="hint" style="margin-top:12px">
+        <strong>モデルの根</strong>: <code>StableDiffusion</code> / <code>Lora</code> / <code>Embeddings</code> などが並んでいるフォルダ。
+        CivitAI の URL を貼ると、種類に合ったフォルダとその中のサブフォルダが保存先の候補に出ます。
+      </p>
+      <div class="row">
+        <input id="civitaiRoot" type="text" placeholder="例: C:\SD\models">
+        <button type="button" id="btnSaveRoot" class="primary small">保存</button>
       </div>
 
       <div id="dialogError" class="error" hidden></div>

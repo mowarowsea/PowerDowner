@@ -208,3 +208,39 @@ table.hosters td.nowrap:not(.mid) { padding-left: 14px; }
 .work summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .work .hint { margin: 8px 0 0; line-height: 1.6; }
 .work code { font-size: 11px; }
+
+/* ---- CivitAI の確認カード ---- */
+.civit { display: flex; flex-direction: column; gap: 8px; }
+.civithead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.civithead h2 { margin: 0; }
+.civitcards { display: flex; flex-direction: column; gap: 8px; }
+.ccard { display: grid; grid-template-columns: 128px 1fr auto; gap: 14px; background: var(--card); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 14px; }
+.ccthumb { width: 128px; height: 176px; border-radius: 8px; overflow: hidden; background: var(--bar); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
+.ccthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ccmain { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.cctitle { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 600; font-size: 15px; }
+.cctitle a { color: var(--text); text-decoration: none; }
+.cctitle a:hover { text-decoration: underline; }
+.cctitle .pill { font-weight: 400; }
+.ccrow { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.ccrow select, .ccrow input[type=text] { min-width: 0; max-width: 100%; }
+.ccrow input[type=text] { flex: 1 1 260px; }
+.cclabel { flex: 0 0 72px; color: var(--muted); font-size: 12px; padding-top: 6px; }
+.ccfiles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ccfiles label { overflow-wrap: anywhere; }
+.ccimgs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; flex: 1; min-width: 0; }
+.ccimg { padding: 0; width: 52px; height: 72px; border: 2px solid transparent; border-radius: 6px; overflow: hidden; background: var(--bar); }
+.ccimg img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ccimg.on { border-color: var(--accent); }
+.ccimg.none { font-size: 11px; color: var(--muted); border: 2px dashed var(--border); background: transparent; }
+.ccimg.none.on { border-color: var(--accent); border-style: solid; color: var(--text); }
+.ccnames { font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 6px 8px; border-radius: 6px; background: var(--bg); overflow-wrap: anywhere; }
+.ccnames .ccdir { color: var(--muted); }
+.ccwarn { color: var(--human); font-size: 12px; }
+.ccbtns { display: flex; flex-direction: column; gap: 8px; align-items: stretch; justify-content: flex-end; }
+@media (max-width: 640px) {
+  .ccard { grid-template-columns: 1fr; }
+  .ccthumb { width: 100%; height: 200px; }
+  .ccbtns { flex-direction: row; justify-content: flex-end; }
+  .cclabel { flex-basis: 100%; padding-top: 0; }
+}

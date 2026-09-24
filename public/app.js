@@ -243,6 +243,7 @@
       body.appendChild(tr);
     }
     $('civitaiTokenState').textContent = state.settings.civitaiToken ? `設定済み (${state.settings.civitaiToken})` : '未設定';
+    if (document.activeElement !== $('civitaiRoot')) $('civitaiRoot').value = state.settings.civitaiModelsRoot || '';
   }
 
   function visibleJobs() {
@@ -344,7 +345,7 @@
 
     const detail = (['downloading', 'waiting_human', 'waiting_site'].includes(job.status) && job.meta && job.meta.detail) ? job.meta.detail : '';
 
-    p.rest.textContent = [detail, state.showAll ? userName(job.userId) : '', job.destDir].filter(Boolean).join(' · ');
+    p.rest.textContent = [civitNote(job), detail, state.showAll ? userName(job.userId) : '', job.destDir].filter(Boolean).join(' · ');
 
     // 同じファイルの別サイト候補。DryEyes からの合流でも増えるので、何番目を試している
     // のかが見えないと「失敗したのに何故また動いているのか」が分からなくなる
@@ -402,6 +403,8 @@
     const acts = [];
     if (job.status === 'failed' || job.status === 'canceled') acts.push(['retry', '最初から再試行', 'このジョブの候補を全部やり直す。失敗の記録を消して、優先度の高いアップローダから試し直します']);
     if (job.status === 'waiting_human' && job.engine === 'jd2') acts.push(['resume', 'JD2 で再開', 'JD2 のスキップを解除して再挑戦させる']);
+    const pv = job.meta && job.meta.preview;
+    if (job.status === 'done' && pv && pv.state === 'failed') acts.push(['preview', '画像だけ取り直す', pv.error || '']);
     if (['queued', 'resolving', 'downloading', 'waiting_human', 'waiting_site'].includes(job.status)) acts.push(['cancel', '中止', '']);
     acts.push(['remove', '×', '一覧から消す (ファイルは残ります)']);
     const key = acts.map((a) => a[0]).join(',');
@@ -418,6 +421,7 @@
           if (act === 'retry') await api('POST', `/api/jobs/${job.id}/retry`);
           else if (act === 'cancel') await api('POST', `/api/jobs/${job.id}/cancel`);
           else if (act === 'resume') await api('POST', `/api/jobs/${job.id}/resume`);
+          else if (act === 'preview') await api('POST', `/api/jobs/${job.id}/preview`);
           else if (act === 'remove') await api('DELETE', `/api/jobs/${job.id}`);
         } catch (e) { alert(e.message); }
       };
@@ -485,6 +489,258 @@
     b.hidden = false;
   }
 
+  // ---- CivitAI の確認カード ----------------------------------------------
+  //
+  // CivitAI の URL は貼った時点で下調べして、カードで「どのファイルを・どの画像と・どこへ」を
+  // 決めてから投入する。保存先はモデルの根の下の実際のフォルダから選ぶ (アニメ / リアルなど、
+  // 分け方は人それぞれなので固定の表を持たない)。
+
+  const CIVIT_URL = /^https?:\/\/(?:www\.)?civitai\.(?:com|red)\//i;
+  /** R (4) 以上を NSFW とみなす。CivitAI の段階は 1 PG / 2 PG-13 / 4 R / 8 X / 16 XXX */
+  const NSFW_LEVEL = 4;
+  const civit = { cards: [], seq: 0, hideNsfw: false };
+  try { civit.hideNsfw = localStorage.getItem('pd.civitHideNsfw') === '1'; } catch { /* ignore */ }
+
+  /** ジョブ行に出す補足。モデル名とバージョン、画像の状況 */
+  function civitNote(job) {
+    const c = job.meta && job.meta.civitai;
+    if (!c) return '';
+    const pv = job.meta.preview || {};
+    const img = {
+      pending: '画像: 待ち', saving: '画像: 保存中', ok: `画像: ${pv.file || '保存済み'}`,
+      failed: `画像: 失敗 (${pv.error || ''})`, none: '画像なし',
+    }[pv.state] || '';
+    return [`${c.modelName} / ${c.versionName}`, img].filter(Boolean).join(' · ');
+  }
+
+  const civitVersion = (card) => card.data && card.data.info.versions.find((v) => v.id === card.versionId);
+  const civitImages = (v) => (v ? v.images.filter((i) => !civit.hideNsfw || i.nsfwLevel < NSFW_LEVEL) : []);
+
+  /** バージョンを選び直した時の初期値。ファイルは primary、画像は先頭、保存先は触っていなければ当たりへ */
+  function civitSelectVersion(card, versionId) {
+    card.versionId = versionId;
+    const v = civitVersion(card);
+    if (!v) return;
+    const file = v.files.find((f) => f.primary) || v.files[0];
+    card.fileId = file ? file.id : null;
+    const imgs = civitImages(v);
+    card.imageUrl = imgs.length ? imgs[0].url : null;
+    if (!card.dirTouched) card.dir = card.data.suggested[versionId] || '';
+  }
+
+  /** 貼られた文字列から CivitAI の URL を抜いてカードにし、残りを返す */
+  function takeCivitai(text) {
+    const rest = [];
+    for (const line of String(text).split(/\r?\n/)) {
+      const other = [];
+      for (const u of line.trim().split(/\s+/).filter(Boolean)) {
+        if (CIVIT_URL.test(u)) addCivitCard(u);
+        else other.push(u);
+      }
+      if (other.length) rest.push(other.join(' '));
+    }
+    return rest.join('\n');
+  }
+
+  async function addCivitCard(url) {
+    if (civit.cards.some((c) => c.url === url)) return;
+    const card = {
+      id: ++civit.seq, url, loading: true, error: '', data: null,
+      versionId: null, fileId: null, imageUrl: null, dir: '', dirTouched: false, custom: false, busy: false,
+    };
+    civit.cards.push(card);
+    renderCivit();
+    try {
+      card.data = await api('GET', `/api/civitai/inspect?url=${encodeURIComponent(url)}`);
+      civitSelectVersion(card, card.data.info.versionId);
+    } catch (e) {
+      card.error = e.message;
+    } finally {
+      card.loading = false;
+      renderCivit();
+      // 1 枚だけなら Enter でそのまま追加できるようにする
+      if (civit.cards.length === 1) {
+        const btn = $('civitCards').querySelector('[data-act=add]:not([disabled])');
+        if (btn) btn.focus();
+      }
+    }
+  }
+
+  function removeCivitCard(card) {
+    civit.cards = civit.cards.filter((c) => c !== card);
+    renderCivit();
+  }
+
+  async function submitCivitCard(card) {
+    if (card.busy || !card.data) return;
+    card.error = '';
+    if (state.userId === null) card.error = '先に「ユーザー / 設定」からユーザーを登録してください';
+    else if (!card.dir.trim()) card.error = '保存先を選んでください';
+    if (card.error) { renderCivit(); return; }
+    card.busy = true;
+    renderCivit();
+    try {
+      await api('POST', '/api/civitai/jobs', {
+        userId: state.userId, url: card.url, versionId: card.versionId, fileId: card.fileId,
+        imageUrl: card.imageUrl, dir: card.dir,
+      });
+      toast(`追加しました: ${card.data.info.name}`);
+      removeCivitCard(card);
+    } catch (e) {
+      card.error = e.message;
+      card.busy = false;
+      renderCivit();
+    }
+  }
+
+  /** 保存先の表示用フルパス */
+  function civitFullDir(card) {
+    const d = card.data;
+    const dir = card.dir.trim();
+    if (!dir) return '';
+    if (/^([a-z]:[\\/]|\\\\)/i.test(dir) || !d.root) return dir;
+    return `${d.root.replace(/[\\/]+$/, '')}\\${dir}`;
+  }
+
+  function renderCivit() {
+    $('civitBox').hidden = civit.cards.length === 0;
+    $('btnCivitAll').hidden = civit.cards.filter((c) => c.data).length < 2;
+    $('civitHideNsfw').checked = civit.hideNsfw;
+    const root = $('civitCards');
+    root.innerHTML = '';
+    for (const card of civit.cards) root.appendChild(renderCivitCard(card));
+  }
+
+  function renderCivitCard(card) {
+    const el = document.createElement('div');
+    el.className = 'ccard';
+    if (!card.data) {
+      el.innerHTML = `
+        <div class="ccthumb"><span>${card.loading ? '…' : '×'}</span></div>
+        <div class="ccmain">
+          <div class="cctitle">${card.loading ? '調べています…' : '読み込めませんでした'}</div>
+          <div class="hint small">${esc(card.url)}</div>
+          ${card.error ? `<div class="error">${esc(card.error)}</div>` : ''}
+        </div>
+        <div class="ccbtns"><button type="button" class="ghost small" data-act="close">やめる</button></div>`;
+      el.querySelector('[data-act=close]').onclick = () => removeCivitCard(card);
+      return el;
+    }
+
+    const d = card.data;
+    const info = d.info;
+    const v = civitVersion(card);
+    const imgs = civitImages(v);
+    const selected = v.images.find((i) => i.url === card.imageUrl);
+    const file = v.files.find((f) => f.id === card.fileId);
+    const exist = file ? (d.existing[file.name] || []) : [];
+    const custom = card.custom || !d.root || (card.dir !== '' && !d.candidates.includes(card.dir));
+    const stem = file ? file.name.replace(/\.[^.]+$/, '') : '';
+
+    el.innerHTML = `
+      <div class="ccthumb">${selected ? `<img src="${esc(selected.thumb)}" alt="" referrerpolicy="no-referrer">` : '<span>画像なし</span>'}</div>
+      <div class="ccmain">
+        <div class="cctitle">
+          <a href="${esc(card.url)}" target="_blank" rel="noreferrer noopener">${esc(info.name)}</a>
+          <span class="pill">${esc(info.type)}</span>
+          ${v.baseModel ? `<span class="pill">${esc(v.baseModel)}</span>` : ''}
+        </div>
+        <div class="hint small">タグ: ${esc(info.tags.join(', ') || 'なし')}</div>
+
+        <div class="ccrow"><span class="cclabel">バージョン</span>
+          <select data-f="version">${info.versions.map((x) => `<option value="${x.id}" ${x.id === card.versionId ? 'selected' : ''}>${esc(x.name)}${x.baseModel ? ` (${esc(x.baseModel)})` : ''}</option>`).join('')}</select>
+          ${v.files.length === 1 && file ? `<span class="hint small">${fmtBytes(file.bytes)}</span>` : ''}
+        </div>
+
+        ${v.files.length > 1 ? `<div class="ccrow"><span class="cclabel">ファイル</span><div class="ccfiles">
+          ${v.files.map((f) => `<label><input type="radio" name="cf${card.id}" value="${f.id}" ${f.id === card.fileId ? 'checked' : ''}> ${esc(f.name)} <span class="hint small">${fmtBytes(f.bytes)}${f.note ? ` · ${esc(f.note)}` : ''}</span></label>`).join('')}
+        </div></div>` : ''}
+
+        <div class="ccrow"><span class="cclabel">プレビュー</span><div class="ccimgs">
+          ${imgs.map((i) => `<button type="button" class="ccimg ${i.url === card.imageUrl ? 'on' : ''}" data-img="${esc(i.url)}"><img src="${esc(i.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"></button>`).join('')}
+          <button type="button" class="ccimg none ${card.imageUrl ? '' : 'on'}" data-img="">なし</button>
+          ${imgs.length < v.images.length ? `<span class="hint small">NSFW ${v.images.length - imgs.length} 枚を隠しています</span>` : ''}
+        </div></div>
+
+        <div class="ccrow"><span class="cclabel">保存先</span>
+          ${d.root ? `<select data-f="dir">
+              ${d.candidates.map((c) => `<option value="${esc(c)}" ${!custom && c === card.dir ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+              <option value="__custom" ${custom ? 'selected' : ''}>その他 (パスを入力)…</option>
+            </select>` : ''}
+          ${custom ? `<input type="text" data-f="dirtext" value="${esc(card.dir)}" placeholder="${d.root ? 'モデルの根からの相対パス、または絶対パス' : '絶対パス (設定で「モデルの根」を入れると候補が出ます)'}">` : ''}
+        </div>
+
+        <div class="ccnames">
+          <div class="ccdir">${esc(civitFullDir(card) || '(保存先が未選択)')}</div>
+          ${file ? `<div>→ ${esc(file.name)}</div>` : ''}
+          <div>→ ${card.imageUrl ? `${esc(stem)}.png <span class="hint small">(jpg の画像なら .jpg)</span>` : '<span class="hint small">画像は保存しない</span>'}</div>
+        </div>
+        ${exist.length ? `<div class="ccwarn">同じ名前のファイルがもうあります: ${exist.map(esc).join(', ')}<br>このまま追加すると「 (2)」付きの別ファイルになります</div>` : ''}
+        ${card.error ? `<div class="error">${esc(card.error)}</div>` : ''}
+      </div>
+      <div class="ccbtns">
+        <button type="button" class="ghost small" data-act="close">やめる</button>
+        <button type="button" class="primary" data-act="add" ${card.busy ? 'disabled' : ''}>${card.busy ? '追加中…' : '追加'}</button>
+      </div>`;
+
+    el.querySelector('[data-act=close]').onclick = () => removeCivitCard(card);
+    el.querySelector('[data-act=add]').onclick = () => submitCivitCard(card);
+    el.querySelector('[data-f=version]').onchange = (e) => { civitSelectVersion(card, Number(e.target.value)); renderCivit(); };
+    for (const r of el.querySelectorAll(`input[name=cf${card.id}]`)) {
+      r.onchange = () => { card.fileId = Number(r.value); renderCivit(); };
+    }
+    for (const b of el.querySelectorAll('[data-img]')) {
+      b.onclick = () => { card.imageUrl = b.dataset.img || null; renderCivit(); };
+    }
+    const sel = el.querySelector('[data-f=dir]');
+    if (sel) {
+      sel.onchange = () => {
+        card.dirTouched = true;
+        card.custom = sel.value === '__custom';
+        // 「その他」は今の値を種にして入力欄を出す。少し書き足すだけで済むように
+        if (!card.custom) card.dir = sel.value;
+        renderCivit();
+        if (card.custom) {
+          const t = document.querySelector(`[data-card="${card.id}"] [data-f=dirtext]`);
+          if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); }
+        }
+      };
+    }
+    const txt = el.querySelector('[data-f=dirtext]');
+    if (txt) {
+      // 打つたびに描き直すと入力欄が作り直されて打てなくなるので、値と表示だけ差し替える
+      txt.oninput = () => {
+        card.dirTouched = true;
+        card.dir = txt.value;
+        el.querySelector('.ccdir').textContent = civitFullDir(card) || '(保存先が未選択)';
+      };
+      txt.onkeydown = (e) => { if (e.key === 'Enter') submitCivitCard(card); };
+    }
+    el.dataset.card = String(card.id);
+    return el;
+  }
+
+  $('civitHideNsfw').onchange = (e) => {
+    civit.hideNsfw = e.target.checked;
+    try { localStorage.setItem('pd.civitHideNsfw', civit.hideNsfw ? '1' : '0'); } catch { /* ignore */ }
+    // 選んでいた画像が隠れたら、見えている先頭に付け替える
+    for (const card of civit.cards) {
+      const imgs = civitImages(civitVersion(card));
+      if (card.imageUrl && !imgs.some((i) => i.url === card.imageUrl)) card.imageUrl = imgs.length ? imgs[0].url : null;
+    }
+    renderCivit();
+  };
+  $('btnCivitAll').onclick = async () => {
+    for (const card of [...civit.cards]) if (card.data) await submitCivitCard(card);
+  };
+  // 貼った瞬間にカードにする。「追加」を押してから調べ始めると、その数秒を余計に待つ
+  $('urls').addEventListener('paste', () => {
+    setTimeout(() => {
+      const ta = $('urls');
+      if (/civitai\.(com|red)\//i.test(ta.value)) ta.value = takeCivitai(ta.value);
+    }, 0);
+  });
+
   // ---- events ------------------------------------------------------------
   $('userSelect').onchange = (e) => {
     state.userId = e.target.value ? Number(e.target.value) : null;
@@ -505,6 +761,9 @@
     await api('PUT', '/api/settings', { civitaiToken: $('civitaiToken').value });
     $('civitaiToken').value = '';
   });
+  $('btnSaveRoot').onclick = () => dialogAction(async () => {
+    await api('PUT', '/api/settings', { civitaiModelsRoot: $('civitaiRoot').value });
+  });
   /**
    * 作品として登録した時の結果。台帳で弾かれたもの・合流したものを黙って捨てると
    * 「登録したのに落ちてこない」の切り分けができなくなるので、必ず画面に出す。
@@ -521,7 +780,9 @@
   $('btnAdd').onclick = async () => {
     const err = $('addError');
     err.hidden = true;
-    const urls = $('urls').value;
+    // CivitAI の行はカードへ回す。残りだけをいつもの投入に流す
+    const urls = takeCivitai($('urls').value);
+    $('urls').value = urls;
     if (!urls.trim()) return;
     if (state.userId === null) { err.textContent = '先に「ユーザー / 設定」からユーザーを登録してください'; err.hidden = false; return; }
     const title = $('workTitle').value.trim();
