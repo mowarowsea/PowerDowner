@@ -414,6 +414,22 @@ export class Queue {
       return;
     }
 
+    // CivitAI の署名付き URL は 1 時間ほどで切れ、大きいモデルは途中で「No URI available」になる。
+    // 前回から少しでも進んでいれば、URL を引き直して *.aria2 の続きから再開させる
+    // (進んでいないなら URL 以外の問題なので、繰り返さずに失敗させる。
+    //  中身の検査で落ちた時は aria2 のエラーではないので対象外 — 引き直すと丸ごと落とし直しになる)
+    const renewedAt = typeof cur.meta.renewedAt === 'number' ? cur.meta.renewedAt : -1;
+    if (cur.engine === 'aria2' && cur.meta.civitai && error.includes('aria2 code') && cur.bytesDone > renewedAt) {
+      const job = this.db.patchJob(jobId, {
+        status: 'queued', engine: null, externalId: null, error: null, speed: 0,
+        meta: { renewedAt: cur.bytesDone },
+      });
+      log(`[queue] CivitAI の URL を引き直して再開: ${cur.url} (${error})`);
+      this.emit(job);
+      this.schedulePump();
+      return;
+    }
+
     // ここから先はこの候補を見限る。ミラーへ移ろうが失敗が確定しようが、
     // 「このアップローダでは落ちなかった」ことに変わりはないので 1 回だけ数える。
     // 台帳スキップ (もう持っている) はジョブにならないので、ここには来ない
@@ -957,7 +973,7 @@ export class Queue {
       meta: {
         mirrors: ordered.slice(1),
         tried: [],
-        hosterKey: this.hosterKeyFor(first), humanCounted: false,
+        hosterKey: this.hosterKeyFor(first), humanCounted: false, renewedAt: -1,
         // route も消す。一度ブラウザへ回ったジョブが config を変えても
         // ブラウザに固定され続けるので、再試行では経路判定からやり直す
         detail: '', humanDetail: '', via: '', route: '', browserDirect: false,
