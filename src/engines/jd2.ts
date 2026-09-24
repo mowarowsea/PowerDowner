@@ -5,6 +5,7 @@ import type { Config } from '../config.js';
 import type { Job, EngineStatus } from '../types.js';
 import { bus, log } from '../events.js';
 import type { EngineCallbacks } from './aria2.js';
+import { uniqueName } from '../naming.js';
 
 /**
  * JDownloader 2 の "Deprecated API" (既定 http://127.0.0.1:3128) クライアント。
@@ -123,6 +124,36 @@ export const HOST_LIMIT = new RegExp(
   ].join('|'),
   'i'
 );
+
+/**
+ * 人間判定ではないスキップ。JD2 はこれらも CAPTCHA と同じ「スキップ」で返すので、
+ * 見分けずにブラウザ経路へ回すと、JD2 なら素通りできるサイト (dailyuploads) を
+ * ブラウザが不慣れな手つきで踏みに行って詰まる。ブラウザに回しても直らないので失敗にする。
+ *
+ * status 文字列はローカライズされている。日本語は JD2 同梱の
+ * translations/.../JdownloaderTranslation.ja.lng (DownloadLink_setSkipped_statusmessage_*) から。
+ * 当たらない言語では従来どおりブラウザへ回るだけなので、取りこぼしても悪化はしない。
+ */
+export const SKIP_NOT_HUMAN = new RegExp(
+  [
+    'ファイル既存', 'file (?:already )?exists',
+    'ダウンロードディレクトリ', 'download (?:directory|folder)', 'invalid (?:path|destination)',
+    '空き容量', 'disk (?:is )?full',
+    '再試行過多', 'too many retries',
+    'ffmpeg', 'ffprobe', 'phantomjs',
+    '利用可能な接続無し', 'no connection',
+  ].join('|'),
+  'i'
+);
+
+/**
+ * `\\NAS\share\...` か。JD2 は保存前に親フォルダを共有のルートまで遡って作ろうとし、
+ * `not allowed to create path \\192.168.3.30\disk1_pt1` で INVALID_DESTINATION になる
+ * (2026-09-24 に JD2 のログで確認)。aria2 と Node は書けるので、JD2 だけ手元で受ける。
+ */
+export function isUnc(dir: string): boolean {
+  return /^[\\/]{2}[^\\/]/.test(dir);
+}
 
 /** JD2 の標準出力から拾う価値のある行。これ以外は数が多すぎて読めない */
 const JD2_NOTEWORTHY = /error|exception|fatal|severe|failed|refused/i;
@@ -415,6 +446,35 @@ export class Jd2Engine {
     return `PD-${jobId}`;
   }
 
+  /** JD2 に書かせる場所。UNC には書けないので、手元で受けて完了後に移す (isUnc 参照) */
+  private saveDir(job: Job): string {
+    return isUnc(job.destDir) ? path.join(this.cfg.dataDir, 'jd2-staging', job.id) : job.destDir;
+  }
+
+  /**
+   * 手元で受けたものを本来の保存先へ移し、落ちたリンクの名前 → 移した後の名前を返す。
+   * 共有フォルダへはボリュームを跨ぐので rename できず、コピーして消す。
+   * 同名が先にあれば上書きせず連番にする (aria2 と同じ扱い)。
+   */
+  private async deliver(job: Job, staging: string): Promise<Map<string, string>> {
+    const renamed = new Map<string, string>();
+    await fs.promises.mkdir(job.destDir, { recursive: true });
+    for (const entry of await fs.promises.readdir(staging)) {
+      const src = path.join(staging, entry);
+      const name = uniqueName(job.destDir, entry, (p) => fs.existsSync(p));
+      const dst = path.join(job.destDir, name);
+      try {
+        await fs.promises.rename(src, dst);
+      } catch {
+        await fs.promises.cp(src, dst, { recursive: true, errorOnExist: true, force: false });
+        await fs.promises.rm(src, { recursive: true, force: true });
+      }
+      renamed.set(entry, name);
+    }
+    await fs.promises.rm(staging, { recursive: true, force: true }).catch(() => { /* 空フォルダが残るだけ */ });
+    return renamed;
+  }
+
   private queryLinkgrabberLinks(filter: Record<string, unknown>): Promise<Jd2Link[]> {
     return this.api<Jd2Link[]>('/linkgrabberv2/queryLinks', [{
       availability: true, host: true, url: true, bytesTotal: true, enabled: true, startAt: 0, maxResults: -1, ...filter,
@@ -458,7 +518,7 @@ export class Jd2Engine {
     await this.cleanupUrl(job.url, job.id);
     const r = await this.api<{ id?: number } | null>('/linkgrabberv2/addLinks', [{
       links: job.url,
-      destinationFolder: job.destDir,
+      destinationFolder: this.saveDir(job),
       packageName: this.pkgName(job.id),
       autostart: false,          // 自分で movetoNewPackage → moveToDownloadlist する
       autoExtract: false,
@@ -607,7 +667,7 @@ export class Jd2Engine {
       this.cb.onFailed(job.id, 'JD2: リンクがオフラインです');
       return;
     }
-    await this.api('/linkgrabberv2/movetoNewPackage', [online, [], this.pkgName(job.id), job.destDir]);
+    await this.api('/linkgrabberv2/movetoNewPackage', [online, [], this.pkgName(job.id), this.saveDir(job)]);
     await this.api('/linkgrabberv2/moveToDownloadlist', [online, []]);
     // 一覧に置くだけでは走らない。制御が止まっていれば動かす
     await this.ensureDownloading();
@@ -636,7 +696,20 @@ export class Jd2Engine {
     // status 文字列はローカライズされているので判定に使わず、真偽値だけで見る
     if (links.every((l) => l.finished === true)) {
       this.tracked.delete(jobId);
-      this.cb.onDone(jobId, links[0]?.name ?? null);
+      let name = links[0]?.name ?? null;
+      const staging = this.saveDir(tr.job);
+      if (staging !== tr.job.destDir) {
+        this.cb.onProgress(jobId, { bytesTotal: total, bytesDone: loaded, speed: 0, detail: '保存先へ移動中' });
+        try {
+          const renamed = await this.deliver(tr.job, staging);
+          if (name) name = renamed.get(name) ?? name;
+          log(`[jd2] ${jobId}: ${staging} -> ${tr.job.destDir} へ移しました`);
+        } catch (e) {
+          this.cb.onFailed(jobId, `落とし終えましたが保存先へ移せませんでした (${(e as Error).message})。ファイルは ${staging} に残っています`);
+          return;
+        }
+      }
+      this.cb.onDone(jobId, name);
       return;
     }
 
@@ -677,6 +750,14 @@ export class Jd2Engine {
       tr.sawCaptcha = true;
       humanDetail = 'JD2 が CAPTCHA 入力を待っています。JD2 のウィンドウで解いてください';
     } else if (pending.every((l) => l.skipped)) {
+      // 保存先やディスクの都合でのスキップは人間判定ではない。ブラウザで試し直しても同じ所で転ぶ。
+      // JD2 にリンクを残すと、制御を start するたびに同じスキップを繰り返す亡霊になるので消しておく
+      const notHuman = pending.find((l) => SKIP_NOT_HUMAN.test(l.status ?? ''));
+      if (notHuman) {
+        await this.cancel(tr.job);
+        this.cb.onFailed(jobId, `JD2 がスキップしました (${notHuman.status})`);
+        return;
+      }
       // ダイアログを出さずにスキップ = JD2 が扱えない種類の人間判定 (Cloudflare Turnstile など)。
       // headless なら「JD2 の画面で解き直してもらう」当てが無いので、ダイアログを見たかどうかに
       // 関わらずブラウザへ回す。人間待ちのまま放置されるのが一番まずい。
