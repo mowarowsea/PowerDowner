@@ -2,6 +2,7 @@ import type { Config } from './config.js';
 import type { Db } from './db.js';
 import type { Engine, Job, ResolvedDownload } from './types.js';
 import { isCivitaiUrl, resolveCivitai } from './resolvers/civitai.js';
+import { isLeechtopUrl, resolveLeechtop } from './resolvers/leechtop.js';
 
 export interface Route {
   engine: Engine;
@@ -44,6 +45,11 @@ export class Router {
         : null;
       const resolved = await resolveCivitai(u, token, pick);
       return { engine: 'aria2', resolved };
+    }
+
+    // ボタンが JS で直リンクを引く作りで、JD2 に渡すと広告の JS などを落としてしまう
+    if (isLeechtopUrl(u)) {
+      return { engine: 'aria2', resolved: await resolveLeechtop(u) };
     }
 
     // JD2 が扱えない人間判定 (Cloudflare Turnstile など) を使うと分かっているサイトは最初からブラウザへ
