@@ -93,6 +93,88 @@ export async function askOwned(cfg: PinaxConfig, queries: OwnQuery[]): Promise<(
   return answers;
 }
 
+/** 作品として登録する時の候補として出す、棚にある作品 1 件 */
+export interface ShelfSeries {
+  id: number;
+  title: string;
+  author: string | null;
+  /** 手元にある冊数。同名の別作品や、名前だけ似た別シリーズを見分ける手がかり */
+  files: number;
+  /** 「続きが出ている — 8〜15巻が未所持」など。落とす価値があるかがここで分かる */
+  shelf: string | null;
+}
+
+/** pinax の /api/series が返す 1 件のうち、こちらで使う分だけ */
+interface SeriesRow {
+  id: number;
+  title: string;
+  author: string | null;
+  /** 棚の実フォルダ名 `[作者] 作品名`。title / author はこれを表示用に整えたもの */
+  folder?: string | null;
+  fileCount?: number;
+  shelf?: { label?: string | null } | null;
+}
+
+/**
+ * 作者・作品名を、棚の実フォルダ名の綴りで取り出す (DryEyes の services/pinax.ts と同じ)。
+ *
+ * pinax の title / author は表示用に全角記号を半角へ寄せてある
+ * (`～Dahliya～` が `~Dahliya~` になる)。これをそのまま使うとリネーム先のフォルダ名が
+ * 既存の棚と 1 文字ずれて、同じ作品が 2 箇所に割れる。だから本物の綴りはフォルダ名から取る。
+ *
+ * 末尾の `(完)` は棚で完結の印に付けているもので、作品名ではないので外す。
+ * 取り出したものが title / author と (表記揺れを除いて) 一致しないときは
+ * フォルダ名の形が想定外ということなので、pinax の値をそのまま使う。
+ */
+export function shelfSpelling(row: Pick<SeriesRow, 'title' | 'author' | 'folder'>): {
+  title: string;
+  author: string | null;
+} {
+  const fallback = { title: row.title, author: row.author ?? null };
+  const m = (row.folder ?? '').match(/^\[([^\]]+)\]\s*(.+)$/);
+  if (!m) return fallback;
+
+  const author = m[1].trim();
+  const title = m[2].replace(/\s*[(（]完[)）]\s*$/, '').trim();
+  const loose = (s: string | null | undefined) => (s ?? '').normalize('NFKC').trim();
+  if (loose(title) !== loose(row.title) || loose(author) !== loose(row.author)) return fallback;
+
+  return { title, author };
+}
+
+/**
+ * 作者名・作品名の部分一致で棚を引く。作品名・著者の入力欄の候補に使う。
+ *
+ * 件数を絞るのは、これが「選ばせる」ための一覧だから。数十件並べると結局読めない。
+ * 聞けなかった時は例外にする — 画面側は理由を薄く出すだけで、手入力はそのまま使える。
+ */
+export async function searchSeries(cfg: PinaxConfig, q: string, limit = 8): Promise<ShelfSeries[]> {
+  const query = q.trim();
+  if (!query) return [];
+  if (!cfg.baseUrl) throw new Error('蔵書 (pinax) の問い合わせ先が未設定です');
+
+  const url = new URL(`${cfg.baseUrl}/api/series`);
+  url.search = new URLSearchParams({ q: query, limit: String(limit), sort: 'title' }).toString();
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: cfg.token ? { Authorization: `Bearer ${cfg.token}` } : {},
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    });
+  } catch (e) {
+    throw new Error(`蔵書 (pinax) に接続できません: ${(e as Error).message}`);
+  }
+  if (!res.ok) throw new Error(`蔵書 (pinax) を引けません (HTTP ${res.status})`);
+
+  const json = (await res.json()) as { items?: SeriesRow[] };
+  return (json.items ?? []).map((row) => ({
+    id: row.id,
+    ...shelfSpelling(row),
+    files: row.fileCount ?? 0,
+    shelf: row.shelf?.label ?? null,
+  }));
+}
+
 /** 死活確認。設定画面や起動時の警告に使う */
 export async function pinaxHealth(cfg: PinaxConfig): Promise<{ ok: boolean; detail: string }> {
   if (!cfg.baseUrl) return { ok: false, detail: '問い合わせ先が未設定です' };

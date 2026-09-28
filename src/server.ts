@@ -14,6 +14,7 @@ import { bus, log } from './events.js';
 import type { Job, EngineStatus } from './types.js';
 import { parseItem, seriesKeyOf } from './volume.js';
 import { decideItems, type ItemInput } from './library.js';
+import { searchSeries } from './pinax.js';
 import type { CaptchaNotice, RejectedNotice } from './events.js';
 import { inspectCivitai, isCivitaiUrl } from './resolvers/civitai.js';
 import { findExisting, guessDir, listCandidates, resolveModelDir } from './models.js';
@@ -163,6 +164,18 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
       throw new HttpError(400, (e as Error).message);
     }
     return { ok: true };
+  });
+
+  // ---- pinax (蔵書) -------------------------------------------------------
+  // 「作品として登録する」の作品名・著者を、棚にある綴りから選ばせる。手で書くと
+  // 1 文字違うだけで別フォルダに割れ、所持の判定も外れて二重に落とす。
+  // 読み取りだけなので UI の他の口と同じく鍵はかけない。
+  app.get<{ Querystring: { q?: string } }>('/api/pinax/series', async (req) => {
+    try {
+      return { items: await searchSeries(cfg.pinax, String(req.query.q ?? '')) };
+    } catch (e) {
+      throw new HttpError(502, (e as Error).message);
+    }
   });
 
   // ---- hosters (アップローダの台帳) ---------------------------------------

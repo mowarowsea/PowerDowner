@@ -820,6 +820,99 @@
       $('btnAdd').disabled = false;
     }
   };
+  // ---- 作品名・著者の候補 (棚 = pinax) -----------------------------------
+  // 手で書くと棚と 1 文字違うだけで別フォルダに割れ、所持の判定も外れる。
+  // 打った語で棚を引き、既にある綴りを選べるようにする。
+  // **巻数は表示だけで欄には入れない** — ここを使うのは大抵、棚に無い巻を落とす時なので、
+  // 棚の巻数を入れても邪魔になるだけ。
+  const shelf = { hits: [], active: -1, seq: 0, timer: 0 };
+
+  function hideShelf() {
+    $('shelfHits').hidden = true;
+    shelf.active = -1;
+  }
+
+  function renderShelf() {
+    const ul = $('shelfHits');
+    const title = $('workTitle').value.trim();
+    const author = $('workAuthor').value.trim();
+    ul.innerHTML = shelf.hits.map((h, i) => {
+      const chosen = h.title === title && (h.author || '') === author;
+      return `<li role="option" data-i="${i}" class="${i === shelf.active ? 'active' : ''}">
+        <div class="t"><b>${esc(h.title)}</b>${chosen ? '<span>選択中</span>' : ''}<span>${h.files}冊</span></div>
+        <span class="s">${esc(h.author || '著者なし')}${h.shelf ? ` · <span class="gap">${esc(h.shelf)}</span>` : ''}</span>
+      </li>`;
+    }).join('');
+    ul.hidden = shelf.hits.length === 0;
+  }
+
+  function pickShelf(i) {
+    const h = shelf.hits[i];
+    if (!h) return;
+    $('workTitle').value = h.title;
+    $('workAuthor').value = h.author || '';
+    hideShelf();
+    $('workVolume').focus();
+  }
+
+  function searchShelf(q) {
+    clearTimeout(shelf.timer);
+    const note = $('shelfNote');
+    if (!q.trim()) { shelf.hits = []; hideShelf(); note.hidden = true; return; }
+    // 打つたびに投げないよう少し待つ。遅れて返ってきた古い答えは捨てる
+    shelf.timer = setTimeout(async () => {
+      const seq = ++shelf.seq;
+      try {
+        const r = await api('GET', `/api/pinax/series?q=${encodeURIComponent(q.trim())}`);
+        if (seq !== shelf.seq) return;
+        shelf.hits = r.items || [];
+        shelf.active = -1;
+        renderShelf();
+        note.hidden = shelf.hits.length > 0;
+        note.textContent = '棚に見当たりません。そのまま新しい作品として書けます。';
+      } catch (e) {
+        if (seq !== shelf.seq) return;
+        // 棚が止まっていても手入力で登録できる。邪魔しない濃さで理由だけ出す
+        shelf.hits = [];
+        hideShelf();
+        note.textContent = e.message;
+        note.hidden = false;
+      }
+    }, 250);
+  }
+
+  for (const id of ['workTitle', 'workAuthor']) {
+    const input = $(id);
+    input.addEventListener('input', () => searchShelf(input.value));
+    input.addEventListener('focus', () => { if (shelf.hits.length) renderShelf(); });
+    input.addEventListener('blur', () => setTimeout(hideShelf, 150));
+    input.addEventListener('keydown', (e) => {
+      if ($('shelfHits').hidden) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        // -1 (どれも選んでいない) を挟んで一周する
+        const n = shelf.hits.length;
+        let a = shelf.active + (e.key === 'ArrowDown' ? 1 : -1);
+        if (a >= n) a = -1;
+        if (a < -1) a = n - 1;
+        shelf.active = a;
+        renderShelf();
+      } else if (e.key === 'Enter' && shelf.active >= 0) {
+        e.preventDefault();
+        pickShelf(shelf.active);
+      } else if (e.key === 'Escape') {
+        hideShelf();
+      }
+    });
+  }
+  // mousedown で拾う — click だと先に blur で一覧が閉じて押せない
+  $('shelfHits').addEventListener('mousedown', (e) => {
+    const li = e.target.closest('li[data-i]');
+    if (!li) return;
+    e.preventDefault();
+    pickShelf(Number(li.dataset.i));
+  });
+
   $('urls').addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') $('btnAdd').click();
   });

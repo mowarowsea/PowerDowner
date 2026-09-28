@@ -208,6 +208,18 @@ table.hosters td.nowrap:not(.mid) { padding-left: 14px; }
 .work summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .work .hint { margin: 8px 0 0; line-height: 1.6; }
 .work code { font-size: 11px; }
+/* 作品名・著者の候補 (棚 = pinax)。入力欄の真下に重ねて出す */
+.suggestwrap { position: relative; }
+.shelfhits { position: absolute; left: 0; right: 0; top: 100%; z-index: 3; margin: 4px 0 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; background: var(--card); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / .12); }
+.shelfhits li { padding: 6px 10px; cursor: pointer; border-top: 1px solid var(--border); }
+.shelfhits li:first-child { border-top: 0; }
+.shelfhits li.active { background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
+.shelfhits .t { display: flex; gap: 6px; align-items: baseline; }
+.shelfhits .t b { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shelfhits .t span, .shelfhits .s { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.shelfhits .s { display: block; overflow: hidden; text-overflow: ellipsis; }
+.shelfhits .s .gap { color: var(--accent); }
+.shelfnote { margin-top: 4px; }
 
 /* ---- CivitAI の確認カード ---- */
 .civit { display: flex; flex-direction: column; gap: 8px; }

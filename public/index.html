@@ -40,11 +40,17 @@
           <strong>巻数が空欄の時</strong>は <strong>1 行 1 巻</strong>として登録し、巻数は URL のファイル名から読みます。
           読めなかった巻は名前を変えずにそのまま置きます。
         </p>
-        <div class="row">
-          <input id="workTitle" type="text" placeholder="作品名 (入れると作品として登録される)">
-          <input id="workAuthor" type="text" placeholder="著者 (任意)">
-          <input id="workVolume" type="text" class="vol" placeholder="巻数 (例: 3 / 1-7)">
+        <!-- 作品名・著者は打つと棚 (pinax) の候補を出す。棚と 1 文字違うと別フォルダに割れるので、
+             既にある綴りを選べるようにしておく。巻数は候補に表示するだけで欄には入れない -->
+        <div class="suggestwrap">
+          <div class="row">
+            <input id="workTitle" type="text" placeholder="作品名 (入れると作品として登録される)" autocomplete="off">
+            <input id="workAuthor" type="text" placeholder="著者 (任意)" autocomplete="off">
+            <input id="workVolume" type="text" class="vol" placeholder="巻数 (例: 3 / 1-7)">
+          </div>
+          <ul id="shelfHits" class="shelfhits" role="listbox" hidden></ul>
         </div>
+        <p id="shelfNote" class="hint small shelfnote" hidden></p>
       </details>
       <div class="row">
         <input id="destDir" type="text" placeholder="保存先を上書き (空欄ならユーザーの既定フォルダ)">
