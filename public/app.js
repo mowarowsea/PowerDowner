@@ -22,7 +22,7 @@
     done: '完了', failed: '失敗', canceled: '中止',
   };
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const ENGINE_LABEL = { aria2: 'aria2', jd2: 'JD2', browser: 'ブラウザ' };
+  const ENGINE_LABEL = { aria2: 'aria2', jd2: 'JD2', browser: 'Browser' };
   const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
   // ---- ミラー候補 --------------------------------------------------------
@@ -125,12 +125,11 @@
   function renderEngines() {
     const el = $('engines');
     el.innerHTML = '';
-    const LABEL = { aria2: 'aria2', jd2: 'JD2', browser: 'Browser' };
     for (const name of ['aria2', 'jd2', 'browser']) {
       const s = state.engines[name];
       const span = document.createElement('span');
       span.className = 'pill ' + (s && s.available ? 'on' : 'off');
-      span.textContent = LABEL[name];
+      span.textContent = ENGINE_LABEL[name];
       span.title = s ? s.detail : '不明';
       el.appendChild(span);
     }
@@ -298,7 +297,6 @@
     <div class="stat"></div>
     <div class="actions"></div>
     <div class="mirs" hidden>
-      <div class="mirnote">同時に走るのは 1 か所だけです。上から順に試して、失敗したら次の候補へ移ります。</div>
       <ol class="mirlist"></ol>
     </div>`;
 
@@ -647,8 +645,7 @@
           <span class="pill">${esc(info.type)}</span>
           ${v.baseModel ? `<span class="pill">${esc(v.baseModel)}</span>` : ''}
         </div>
-        <div class="hint small">タグ: ${esc(info.tags.join(', ') || 'なし')}</div>
-
+        
         <div class="ccrow"><span class="cclabel">バージョン</span>
           <select data-f="version">${info.versions.map((x) => `<option value="${x.id}" ${x.id === card.versionId ? 'selected' : ''}>${esc(x.name)}${x.baseModel ? ` (${esc(x.baseModel)})` : ''}</option>`).join('')}</select>
           ${v.files.length === 1 && file ? `<span class="hint small">${fmtBytes(file.bytes)}</span>` : ''}
@@ -868,8 +865,7 @@
         shelf.hits = r.items || [];
         shelf.active = -1;
         renderShelf();
-        note.hidden = shelf.hits.length > 0;
-        note.textContent = '棚に見当たりません。そのまま新しい作品として書けます。';
+        note.hidden = true;
       } catch (e) {
         if (seq !== shelf.seq) return;
         // 棚が止まっていても手入力で登録できる。邪魔しない濃さで理由だけ出す

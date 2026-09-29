@@ -29,17 +29,9 @@
 
   <main>
     <section class="card add">
-      <textarea id="urls" rows="3" placeholder="URL を貼り付け (複数行 OK)&#10;例: https://civitai.com/models/12345  /  https://rapidgator.net/file/..."></textarea>
+      <textarea id="urls" rows="3" placeholder="URL を貼る (複数行 OK)"></textarea>
       <details id="workBox" class="work">
         <summary>作品として登録する (DryEyes を通さない)</summary>
-        <p class="hint">
-          作品名を入れると、落ち終わった時に <code>[著者] 作品名</code> のフォルダへ
-          <code>[著者] 作品名 第nn巻.拡張子</code> で整理されます。<strong>棚 (pinax) に既にある巻は落としません。</strong><br>
-          <strong>巻数を書いた時</strong>は、貼った URL 全部を<strong>同じ 1 ファイルのミラー</strong>
-          (上から順に試す代わりの落とし先) として 1 件にまとめます。<br>
-          <strong>巻数が空欄の時</strong>は <strong>1 行 1 巻</strong>として登録し、巻数は URL のファイル名から読みます。
-          読めなかった巻は名前を変えずにそのまま置きます。
-        </p>
         <!-- 作品名・著者は打つと棚 (pinax) の候補を出す。棚と 1 文字違うと別フォルダに割れるので、
              既にある綴りを選べるようにしておく。巻数は候補に表示するだけで欄には入れない -->
         <div class="suggestwrap">
@@ -62,7 +54,6 @@
     <section id="civitBox" class="civit" hidden>
       <div class="civithead">
         <h2>CivitAI</h2>
-        <span class="hint small">モデルと、同じ名前のプレビュー画像を 1 セットで保存します</span>
         <div class="spacer"></div>
         <label class="toggle"><input type="checkbox" id="civitHideNsfw"> NSFW の画像を候補から外す</label>
         <button id="btnCivitAll" class="primary small" hidden>まとめて追加</button>
@@ -78,14 +69,13 @@
         <button id="btnClearDone" class="ghost small">完了分を一覧から消す</button>
       </div>
       <div id="jobs" class="jobs"></div>
-      <div id="jobsEmpty" class="empty" hidden>まだジョブがありません。上の欄に URL を貼って「追加」してください。</div>
+      <div id="jobsEmpty" class="empty" hidden>ジョブはありません</div>
     </section>
   </main>
 
   <dialog id="usersDialog">
     <form method="dialog" class="dialog">
       <h2>ユーザー</h2>
-      <p class="hint">ユーザーはデータの切り分け用です。パスワードはありません。既定フォルダは絶対パスで指定してください。</p>
       <table class="users">
         <thead><tr><th>名前</th><th>既定フォルダ</th><th></th></tr></thead>
         <tbody id="usersBody"></tbody>
@@ -99,18 +89,13 @@
       </table>
 
       <h2>CivitAI</h2>
-      <p class="hint">ログイン必須モデルを落とすには API キーが必要です。CivitAI のアカウント設定で発行できます。全ユーザー共通です。</p>
       <div class="row">
-        <input id="civitaiToken" type="password" placeholder="API キー (空欄で削除)">
+        <input id="civitaiToken" type="password" placeholder="API キー (空欄で保存すると削除)">
         <span id="civitaiTokenState" class="hint"></span>
         <button type="button" id="btnSaveToken" class="primary small">保存</button>
       </div>
-      <p class="hint" style="margin-top:12px">
-        <strong>モデルの根</strong>: <code>StableDiffusion</code> / <code>Lora</code> / <code>Embeddings</code> などが並んでいるフォルダ。
-        CivitAI の URL を貼ると、種類に合ったフォルダとその中のサブフォルダが保存先の候補に出ます。
-      </p>
       <div class="row">
-        <input id="civitaiRoot" type="text" placeholder="例: C:\SD\models">
+        <input id="civitaiRoot" type="text" placeholder="例: C:\SD\models (StableDiffusion / Lora が並ぶフォルダ)">
         <button type="button" id="btnSaveRoot" class="primary small">保存</button>
       </div>
 
@@ -124,11 +109,6 @@
   <dialog id="hostersDialog">
     <form method="dialog" class="dialog wide">
       <h2>アップローダ</h2>
-      <p class="hint">
-        実績を見て、<strong>使うかどうかと試す順番</strong>を決めます。「使用する」を外したアップローダは、
-        DryEyes から来ても手で貼っても<strong>ジョブになりません</strong>。<br>
-        サイトの仕様が変わって通らなくなったら、直すのではなくここを外してください。ほかのミラーで回ります。
-      </p>
       <div id="hostersWarn" class="banner warn" hidden></div>
       <table class="hosters">
         <thead>
@@ -144,9 +124,7 @@
         </thead>
         <tbody id="hostersBody"></tbody>
       </table>
-      <p class="hint">
-        上にあるものから先に試します。同じファイルが複数のアップローダにある時だけ効きます。
-      </p>
+      <p class="hint small">上から順に試す。切った業者は DryEyes から来てもジョブにならない。</p>
       <div id="hostersError" class="error" hidden></div>
       <div class="row end">
         <button value="close" class="ghost">閉じる</button>
