@@ -17,8 +17,7 @@
     <div class="engines" id="engines"></div>
     <div class="spacer"></div>
     <select id="userSelect" aria-label="ユーザー"></select>
-    <button id="btnHosters" class="ghost">アップローダ</button>
-    <button id="btnUsers" class="ghost">ユーザー / 設定</button>
+    <button id="btnSettings" class="ghost"><i class="fa-solid fa-gear"></i> 設定</button>
   </header>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
@@ -77,59 +76,61 @@
     </section>
   </main>
 
-  <dialog id="usersDialog">
+  <dialog id="settingsDialog">
     <form method="dialog" class="dialog">
-      <h2>ユーザー</h2>
-      <table class="users">
-        <thead><tr><th>名前</th><th>既定フォルダ</th><th></th></tr></thead>
-        <tbody id="usersBody"></tbody>
-        <tfoot>
-          <tr>
-            <td><input id="newUserName" type="text" placeholder="新しいユーザー名"></td>
-            <td><input id="newUserDir" type="text" placeholder="D:\Downloads\name"></td>
-            <td><button type="button" id="btnNewUser" class="primary small">追加</button></td>
-          </tr>
-        </tfoot>
-      </table>
+      <nav class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="hosters">アップローダ</button>
+        <button type="button" role="tab" data-tab="users">ユーザー</button>
+        <button type="button" role="tab" data-tab="civitai">CivitAI</button>
+      </nav>
 
-      <h2>CivitAI</h2>
-      <div class="row">
-        <input id="civitaiToken" type="password" placeholder="API キー (空欄で保存すると削除)">
-        <span id="civitaiTokenState" class="hint"></span>
-        <button type="button" id="btnSaveToken" class="primary small">保存</button>
-      </div>
-      <div class="row">
-        <input id="civitaiRoot" type="text" placeholder="例: C:\SD\models (StableDiffusion / Lora が並ぶフォルダ)">
-        <button type="button" id="btnSaveRoot" class="primary small">保存</button>
-      </div>
+      <section data-pane="hosters">
+        <div id="hostersWarn" class="banner warn" hidden></div>
+        <table class="hosters">
+          <thead>
+            <tr>
+              <th>アップローダ</th>
+              <th class="num" title="実ファイルが残った回数">成功</th>
+              <th class="num" title="ダウンロードを始められなかった回数を含む。所持済みスキップは含まない">失敗</th>
+              <th class="num" title="CAPTCHA などで人間の操作を求めた回数 (ジョブごとに 1 回)">人間待ち</th>
+              <th>最後の成功</th>
+              <th class="mid">使用する</th>
+              <th class="mid">優先度</th>
+            </tr>
+          </thead>
+          <tbody id="hostersBody"></tbody>
+        </table>
+        <p class="hint small">上から順に試す。切った業者は DryEyes から来てもジョブにならない。</p>
+        <div id="hostersError" class="error" hidden></div>
+      </section>
+
+      <section data-pane="users" hidden>
+        <table class="users">
+          <thead><tr><th>名前</th><th>既定フォルダ</th><th></th></tr></thead>
+          <tbody id="usersBody"></tbody>
+          <tfoot>
+            <tr>
+              <td><input id="newUserName" type="text" placeholder="新しいユーザー名"></td>
+              <td><input id="newUserDir" type="text" placeholder="D:\Downloads\name (絶対パス)"></td>
+              <td><button type="button" id="btnNewUser" class="primary sm"><i class="fa-solid fa-plus"></i> 追加</button></td>
+            </tr>
+          </tfoot>
+        </table>
+      </section>
+
+      <section data-pane="civitai" hidden>
+        <div class="row">
+          <input id="civitaiToken" type="password" placeholder="API キー (空欄で保存すると削除)">
+          <span id="civitaiTokenState" class="hint"></span>
+          <button type="button" id="btnSaveToken" class="primary sm">保存</button>
+        </div>
+        <div class="row">
+          <input id="civitaiRoot" type="text" placeholder="例: C:\SD\models (StableDiffusion / Lora が並ぶフォルダ)">
+          <button type="button" id="btnSaveRoot" class="primary sm">保存</button>
+        </div>
+      </section>
 
       <div id="dialogError" class="error" hidden></div>
-      <div class="row end">
-        <button value="close" class="ghost">閉じる</button>
-      </div>
-    </form>
-  </dialog>
-
-  <dialog id="hostersDialog">
-    <form method="dialog" class="dialog wide">
-      <h2>アップローダ</h2>
-      <div id="hostersWarn" class="banner warn" hidden></div>
-      <table class="hosters">
-        <thead>
-          <tr>
-            <th>アップローダ</th>
-            <th class="num" title="実ファイルが残った回数">成功</th>
-            <th class="num" title="ダウンロードを始められなかった回数を含む。所持済みスキップは含まない">失敗</th>
-            <th class="num" title="CAPTCHA などで人間の操作を求めた回数 (ジョブごとに 1 回)">人間待ち</th>
-            <th>最後の成功</th>
-            <th class="mid">使用する</th>
-            <th class="mid">優先度</th>
-          </tr>
-        </thead>
-        <tbody id="hostersBody"></tbody>
-      </table>
-      <p class="hint small">上から順に試す。切った業者は DryEyes から来てもジョブにならない。</p>
-      <div id="hostersError" class="error" hidden></div>
       <div class="row end">
         <button value="close" class="ghost">閉じる</button>
       </div>

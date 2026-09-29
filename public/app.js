@@ -179,25 +179,22 @@
     list.forEach((h, i) => {
       const tr = document.createElement('tr');
       if (!h.enabled) tr.className = 'off';
-      const domains = (h.domains || []).join(', ');
+      const zero = (n) => (n > 0 ? '' : ' zero');
       tr.innerHTML = `
-        <td>
+        <td title="${esc((h.domains || []).join(', '))}">
           <div class="hoster">
             <img class="fav" src="/api/favicon?host=${encodeURIComponent((h.domains || [])[0] || '')}" alt="" width="16" height="16">
-            <div>
-              <div class="name">${esc(h.label)}</div>
-              <div class="hint small">${esc(domains)}</div>
-            </div>
+            <span class="name">${esc(h.label)}</span>
           </div>
         </td>
-        <td class="num ok">${h.okCount}</td>
-        <td class="num ${h.failCount > 0 ? 'bad' : ''}">${h.failCount}</td>
-        <td class="num ${h.humanCount > 0 ? 'warnnum' : ''}">${h.humanCount}</td>
+        <td class="num${zero(h.okCount)}">${h.okCount}</td>
+        <td class="num${h.failCount > 0 ? ' bad' : ' zero'}">${h.failCount}</td>
+        <td class="num${zero(h.humanCount)}">${h.humanCount}</td>
         <td class="nowrap" title="${esc(h.lastOkAt || '')}">${esc(fmtAgo(h.lastOkAt))}</td>
-        <td class="mid"><input type="checkbox" data-act="use" ${h.enabled ? 'checked' : ''}></td>
+        <td class="mid"><input type="checkbox" class="switch" data-act="use" ${h.enabled ? 'checked' : ''}></td>
         <td class="mid nowrap">
-          <button type="button" class="ghost small" data-act="up" ${i === 0 ? 'disabled' : ''} title="先に試す"><i class="fa-solid fa-arrow-up"></i></button>
-          <button type="button" class="ghost small" data-act="down" ${i === list.length - 1 ? 'disabled' : ''} title="後に回す"><i class="fa-solid fa-arrow-down"></i></button>
+          <button type="button" class="quiet sm" data-act="up" ${i === 0 ? 'disabled' : ''} title="先に試す"><i class="fa-solid fa-arrow-up"></i></button>
+          <button type="button" class="quiet sm" data-act="down" ${i === list.length - 1 ? 'disabled' : ''} title="後に回す"><i class="fa-solid fa-arrow-down"></i></button>
         </td>`;
       tr.querySelector('[data-act=use]').onchange = (e) => hostersAction(
         () => api('PATCH', `/api/hosters/${encodeURIComponent(h.key)}`, { enabled: e.target.checked }),
@@ -242,7 +239,7 @@
       tr.innerHTML = `
         <td><input type="text" data-field="name" value="${esc(u.name)}"></td>
         <td><input type="text" data-field="defaultDir" value="${esc(u.defaultDir ?? '')}" placeholder="未設定 (投入時にエラーになります)"></td>
-        <td><button type="button" class="small" data-act="save"><i class="fa-solid fa-check"></i> 保存</button> <button type="button" class="small ghost" data-act="del"><i class="fa-solid fa-trash-can"></i> 削除</button></td>`;
+        <td><button type="button" class="sm" data-act="save"><i class="fa-solid fa-check"></i> 保存</button> <button type="button" class="sm ghost" data-act="del"><i class="fa-solid fa-trash-can"></i> 削除</button></td>`;
       tr.querySelector('[data-act=save]').onclick = async () => {
         const name = tr.querySelector('[data-field=name]').value;
         const defaultDir = tr.querySelector('[data-field=defaultDir]').value;
@@ -458,7 +455,7 @@
     renderEngines();
     renderUsers();
     renderJobs();
-    if ($('hostersDialog').open) renderHosters();
+    if ($('settingsDialog').open) renderHosters();
   }
 
   function applyState(s) {
@@ -596,7 +593,7 @@
     if (card.busy || !card.data) return;
     card.error = '';
     if (state.showAll) card.error = 'ユーザーを選んでください';
-    else if (state.userId === null) card.error = '先に「ユーザー / 設定」からユーザーを登録してください';
+    else if (state.userId === null) card.error = '先に「設定」からユーザーを登録してください';
     else if (!card.dir.trim()) card.error = '保存先を選んでください';
     if (card.error) { renderCivit(); return; }
     card.busy = true;
@@ -769,9 +766,20 @@
     saveUserPick();
     renderJobs();
   };
-  $('btnUsers').onclick = () => { $('dialogError').hidden = true; $('usersDialog').showModal(); };
-  $('btnHosters').onclick = () => {
-    $('hostersDialog').showModal();
+  // ---- 設定ダイアログ (タブ 3 枚) ----
+  function setTab(name) {
+    for (const b of document.querySelectorAll('[data-tab]')) b.setAttribute('aria-selected', String(b.dataset.tab === name));
+    for (const sec of document.querySelectorAll('[data-pane]')) sec.hidden = sec.dataset.pane !== name;
+    try { localStorage.setItem('pd.settingsTab', name); } catch { /* ignore */ }
+  }
+  for (const b of document.querySelectorAll('[data-tab]')) b.onclick = () => setTab(b.dataset.tab);
+  $('btnSettings').onclick = () => {
+    let tab = 'hosters';
+    try { tab = localStorage.getItem('pd.settingsTab') || tab; } catch { /* ignore */ }
+    if (!document.querySelector(`[data-tab="${tab}"]`)) tab = 'hosters';
+    setTab(tab);
+    $('dialogError').hidden = true;
+    $('settingsDialog').showModal();
     hostersAction(async () => null);
   };
   $('btnNewUser').onclick = () => dialogAction(async () => {
@@ -816,7 +824,7 @@
     $('urls').value = urls;
     if (!urls.trim()) return;
     if (state.showAll) { err.textContent = 'ユーザーを選んでください'; err.hidden = false; return; }
-    if (state.userId === null) { err.textContent = '先に「ユーザー / 設定」からユーザーを登録してください'; err.hidden = false; return; }
+    if (state.userId === null) { err.textContent = '先に「設定」からユーザーを登録してください'; err.hidden = false; return; }
     const title = $('workTitle').value.trim();
     $('btnAdd').disabled = true;
     try {
@@ -840,7 +848,7 @@
       }
       // 「使用しない」で弾いたものは、消えた理由が分からないと設定を疑えない
       for (const name of new Set((r.rejected || []).map((x) => x.hoster))) {
-        toast(`${name} は使用しない設定です (「アップローダ」で変更できます)`, 'warn');
+        toast(`${name} は使用しない設定です (「設定」で変更できます)`, 'warn');
       }
       if (r.skipped && r.skipped.length) { err.textContent = `スキップ: ${r.skipped.join(', ')}`; err.hidden = false; }
     } catch (e) {
