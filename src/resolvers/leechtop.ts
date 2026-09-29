@@ -85,7 +85,8 @@ export async function resolveLeechtop(u: URL): Promise<ResolvedDownload> {
   return {
     url,
     filename: filenameFromUrl(url),
-    // Range を無視して 200 で全体を返すサーバーなので分割しない
+    // Range を無視して 200 で全体を返すサーバーなので分割しない。途中で切れた続きも取れない
+    resumable: false,
     options: { 'user-agent': UA, referer: u.href, split: '1', 'max-connection-per-server': '1' },
   };
 }

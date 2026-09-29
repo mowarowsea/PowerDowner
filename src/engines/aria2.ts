@@ -310,7 +310,10 @@ export class Aria2Engine {
     // 連番付けは r.options の out も含めて最後に。ここを通さないと
     // 同名が既にある時に aria2 が code 13 で弾いて 1 バイトも落ちない
     const out = opts.out;
-    if (typeof out === 'string') opts.out = outNameFor(job.destDir, out, (p) => fs.existsSync(p));
+    if (typeof out === 'string') {
+      if (r.resumable === false) discardPartial(job.destDir, out);
+      opts.out = outNameFor(job.destDir, out, (p) => fs.existsSync(p));
+    }
     const gid = await this.call<string>('aria2.addUri', [[r.url], opts]);
     this.gidToJob.set(gid, job.id);
     return gid;
@@ -399,6 +402,26 @@ export function outNameFor(dir: string, file: string, exists: (p: string) => boo
     if (!taken(candidate)) return candidate;
   }
   return `${base} (${Date.now()})${raw}`;
+}
+
+/**
+ * 落としかけ (本体 + `*.aria2`) を捨てる。途中から落とせないサーバー向け。
+ *
+ * aria2 自身の `--always-resume=false` (続きが取れなければ最初から) にも頼れるが、
+ * 1.37.0 は最初からに切り替えた直後にディスクキャッシュの不具合でプロセスごと
+ * 落ちることがある (全ジョブが巻き添えになる) ので、渡す前にこちらで消しておく。
+ * `*.aria2` が無いものは落とし終えたファイルなので触らない。
+ */
+export function discardPartial(dir: string, file: string): void {
+  const p = path.join(dir, file);
+  if (!fs.existsSync(`${p}.aria2`)) return;
+  try {
+    fs.rmSync(p, { force: true });
+    fs.rmSync(`${p}.aria2`, { force: true });
+    log(`[aria2] 途中から落とせないサーバーなので、落としかけを捨てて最初から: ${file}`);
+  } catch (e) {
+    log(`[aria2] 落としかけを捨てられませんでした: ${file} (${(e as Error).message})`);
+  }
 }
 
 function fileNameOf(st: Aria2Status): string | undefined {

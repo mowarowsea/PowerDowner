@@ -444,13 +444,17 @@ export class Queue {
     // 前回から少しでも進んでいれば、URL を引き直して *.aria2 の続きから再開させる
     // (進んでいないなら URL 以外の問題なので、繰り返さずに失敗させる。
     //  中身の検査で落ちた時は aria2 のエラーではないので対象外 — 引き直すと丸ごと落とし直しになる)
+    // code 8 (続きを要求したらサーバーが頭から返してきた) も同じく引き直す。leechtop のように
+    // Range を無視するサーバーで途中で切れるとこうなり、落としかけを捨てて最初から落とすしかない
+    // (捨てるのは投入時の Aria2Engine.add)
     const renewedAt = typeof cur.meta.renewedAt === 'number' ? cur.meta.renewedAt : -1;
-    if (cur.engine === 'aria2' && cur.meta.civitai && error.includes('aria2 code') && cur.bytesDone > renewedAt) {
+    const renewable = cur.meta.civitai ? error.includes('aria2 code') : error.includes('aria2 code 8)');
+    if (cur.engine === 'aria2' && renewable && cur.bytesDone > renewedAt) {
       const job = this.db.patchJob(jobId, {
         status: 'queued', engine: null, externalId: null, error: null, speed: 0,
         meta: { renewedAt: cur.bytesDone },
       });
-      log(`[queue] CivitAI の URL を引き直して再開: ${cur.url} (${error})`);
+      log(`[queue] URL を引き直して再開: ${cur.url} (${error})`);
       this.emit(job);
       this.schedulePump();
       return;

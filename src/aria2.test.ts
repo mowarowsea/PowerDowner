@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { outNameFor } from './engines/aria2.js';
+import { discardPartial, outNameFor } from './engines/aria2.js';
 
 const DIR = path.join('Z:', '90_新僧スペース', 'JDownloaderダウンロード');
 /** 手元にあることにするファイル群 */
@@ -48,4 +50,19 @@ test('書庫以外は拡張子を保ったまま連番を挟む', () => {
   assert.equal(outNameFor(DIR, '動画.mp4', having('動画.mp4')), '動画 (2).mp4');
   assert.equal(outNameFor(DIR, '動画 (2).mp4', having('動画 (2).mp4')), '動画 (3).mp4');
   assert.equal(outNameFor(DIR, '拡張子なし', having('拡張子なし')), '拡張子なし (2)');
+});
+
+test('途中から落とせないサーバー向けに、落としかけ (本体 + *.aria2) だけを捨てる', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-a2-'));
+  fs.writeFileSync(path.join(dir, 'half.rar'), 'RAR!');
+  fs.writeFileSync(path.join(dir, 'half.rar.aria2'), 'ctl');
+  // *.aria2 が無いのは落とし終えたファイル。消してはいけない
+  fs.writeFileSync(path.join(dir, 'done.rar'), 'RAR!');
+
+  discardPartial(dir, 'half.rar');
+  discardPartial(dir, 'done.rar');
+
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['done.rar']);
+  // 捨てた後は同じ名前がそのまま空くので、連番が付かない
+  assert.equal(outNameFor(dir, 'half.rar', (p) => fs.existsSync(p)), 'half.rar');
 });

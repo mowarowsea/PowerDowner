@@ -54,6 +54,12 @@ export interface ResolvedDownload {
   checksum?: string;       // aria2 形式 "sha-256=<hex>"
   bytesTotal?: number;
   options?: Record<string, string>; // aria2 の追加オプション (user-agent, referer, split など)
+  /**
+   * false = サーバーが Range を無視する (途中から落とせない)。落としかけが残っていると
+   * aria2 は続きを要求して code 8 で止まり、何度再試行しても同じところで転ぶので、
+   * 投入前に落としかけを捨てて最初から落とす (`Aria2Engine.add`)。
+   */
+  resumable?: boolean;
 }
 
 export interface EngineStatus {
