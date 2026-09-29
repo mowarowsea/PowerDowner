@@ -5,7 +5,10 @@
     users: [], jobs: new Map(), engines: {}, hosters: [], settings: {}, userId: null, showAll: false,
     // ミラー内訳を開いているジョブ。進捗で行を作り直しても開きっぱなしを保つ
     openMirrors: new Set(),
+    // 完了ジョブは既定で畳む
+    showDone: false,
   };
+  try { state.showDone = localStorage.getItem('pd.showDone') === '1'; } catch { /* ignore */ }
   const LOG_MAX = 80;
   const logLines = [];
 
@@ -256,9 +259,17 @@
   }
 
   function renderJobs() {
-    const list = visibleJobs();
+    const all = visibleJobs();
+    // 動いているものが埋もれないよう、完了は末尾へ回す (どちらも新しい順)
+    const active = all.filter((j) => j.status !== 'done');
+    const done = all.filter((j) => j.status === 'done');
+    const list = state.showDone ? [...active, ...done] : active;
     const root = $('jobs');
-    $('jobsEmpty').hidden = list.length > 0;
+    $('jobsEmpty').hidden = all.length > 0;
+    $('jobCount').textContent = all.length ? String(all.length) : '';
+    $('doneFoot').hidden = done.length === 0;
+    $('doneCount').textContent = String(done.length);
+    $('btnToggleDone').innerHTML = `<i class="fa-solid fa-chevron-${state.showDone ? 'down' : 'right'}"></i> ${state.showDone ? '隠す' : '表示'}`;
     const keep = new Set();
     for (const job of list) {
       keep.add(job.id);
@@ -285,31 +296,30 @@
   // 進捗更新は秒単位で飛んでくるので、行は一度組み立てて以後は中身だけ差し替える。
   // (毎回 innerHTML を書き直すとファビコンの img が作り直されてちらつく)
   const JOB_HTML = `
-    <span class="badge"></span>
-    <img class="fav" alt="" width="20" height="20" loading="lazy">
+    <i class="stripe"></i>
+    <img class="fav" alt="" width="18" height="18" loading="lazy">
     <div class="name">
       <div class="title"></div>
-      <div class="sub"><span class="host"></span><span class="eng"></span><button type="button" class="mirbtn ghost" hidden></button><span class="rest"></span></div>
-      <div class="human" hidden></div>
-      <div class="err" hidden></div>
-      <div class="bar"><i></i></div>
+      <div class="sub">
+        <span class="host"></span><span class="eng"></span><button type="button" class="mirbtn" hidden></button>
+        <span class="rest"></span><span class="human" hidden></span><span class="err" hidden></span>
+      </div>
     </div>
-    <div class="stat"></div>
-    <div class="actions"></div>
-    <div class="mirs" hidden>
-      <ol class="mirlist"></ol>
-    </div>`;
+    <div class="stat"><div class="sz"></div><div class="st"></div></div>
+    <div class="acts"></div>
+    <div class="mirs" hidden><ol class="mirlist"></ol></div>
+    <div class="bar"><i></i></div>`;
 
   function renderJob(el, job) {
     if (!el.__p) {
       el.innerHTML = JOB_HTML;
       el.__p = {
-        badge: el.querySelector('.badge'), fav: el.querySelector('.fav'),
+        fav: el.querySelector('.fav'),
         title: el.querySelector('.title'), host: el.querySelector('.host'),
         eng: el.querySelector('.eng'), rest: el.querySelector('.rest'),
         human: el.querySelector('.human'), err: el.querySelector('.err'),
-        bar: el.querySelector('.bar > i'), stat: el.querySelector('.stat'),
-        actions: el.querySelector('.actions'),
+        bar: el.querySelector('.bar > i'), sz: el.querySelector('.sz'), st: el.querySelector('.st'),
+        actions: el.querySelector('.acts'),
         mirbtn: el.querySelector('.mirbtn'), mirs: el.querySelector('.mirs'),
         mirlist: el.querySelector('.mirlist'),
       };
@@ -324,9 +334,6 @@
     const host = hostOf(job.url);
     el.className = `job ${job.status}`;
 
-    p.badge.className = `badge ${job.status}`;
-    p.badge.textContent = STATUS_LABEL[job.status] || job.status;
-
     if (p.fav.dataset.host !== host) {
       p.fav.dataset.host = host;
       p.fav.src = `/api/favicon?host=${encodeURIComponent(host)}`;
@@ -336,16 +343,16 @@
     // CivitAI は再試行でファイル名が消えても、何のモデルかはモデル名で分かるようにする
     const civ = job.meta && job.meta.civitai;
     p.title.textContent = job.filename || (civ ? `${civ.modelName} / ${civ.versionName}` : job.url);
-    p.title.title = job.url;
+    // 保存先は行に出さず、URL と一緒にここへ
+    p.title.title = [job.url, job.destDir].filter(Boolean).join('\n');
 
     p.host.textContent = host;
     p.eng.textContent = job.engine ? (ENGINE_LABEL[job.engine] || job.engine) : '';
-    p.eng.className = 'eng' + (job.engine ? ` e-${job.engine}` : '');
     p.eng.hidden = !job.engine;
 
     const detail = (['downloading', 'waiting_human', 'waiting_site'].includes(job.status) && job.meta && job.meta.detail) ? job.meta.detail : '';
-
-    p.rest.textContent = [civitNote(job), detail, state.showAll ? userName(job.userId) : '', job.destDir].filter(Boolean).join(' · ');
+    p.rest.textContent = [detail, civitNote(job), state.showAll ? userName(job.userId) : ''].filter(Boolean).join(' · ');
+    p.rest.hidden = !p.rest.textContent;
 
     // 同じファイルの別サイト候補。DryEyes からの合流でも増えるので、何番目を試している
     // のかが見えないと「失敗したのに何故また動いているのか」が分からなくなる
@@ -357,12 +364,14 @@
     p.err.textContent = job.error || '';
     p.err.hidden = !job.error;
 
-    const pct = job.bytesTotal > 0 ? Math.min(100, (job.bytesDone / job.bytesTotal) * 100) : (job.status === 'done' ? 100 : 0);
+    const pct = job.bytesTotal > 0 ? Math.min(100, (job.bytesDone / job.bytesTotal) * 100) : 0;
     p.bar.style.width = `${pct.toFixed(1)}%`;
 
-    p.stat.innerHTML = job.status === 'downloading' || job.status === 'waiting_human'
-      ? `${fmtBytes(job.bytesDone)} / ${job.bytesTotal ? fmtBytes(job.bytesTotal) : '?'}<br>${fmtBytes(job.speed)}/s`
+    const running = job.status === 'downloading' || job.status === 'waiting_human';
+    p.sz.textContent = running ? `${fmtBytes(job.bytesDone)} / ${job.bytesTotal ? fmtBytes(job.bytesTotal) : '?'}`
       : job.status === 'done' ? fmtBytes(job.bytesTotal || job.bytesDone) : '';
+    p.st.textContent = job.status === 'downloading' ? `${fmtBytes(job.speed)}/s`
+      : (STATUS_LABEL[job.status] || job.status);
 
     renderActions(p.actions, job);
   }
@@ -389,10 +398,9 @@
     if (p.mirlist.dataset.key === key) return;
     p.mirlist.dataset.key = key;
 
-    p.mirlist.innerHTML = rows.map((r, i) => `
+    p.mirlist.innerHTML = rows.map((r) => `
       <li class="mir s-${r.kind}">
-        <span class="mnum">${i + 1}</span>
-        <span class="mbadge">${esc(r.label)}</span>
+        <span class="mark" title="${esc(r.label)}">${{ failed: '×', active: '●', done: '✓', pending: '·' }[r.kind]}</span>
         <span class="mhoster" title="${esc(r.host || '')}">${esc(r.hoster)}${r.off ? ' <span class="moff" title="台帳で「使用しない」にした業者です。既に候補に入っている分はこのまま試します">除外</span>' : ''}</span>
         <a class="murl" href="${esc(r.url)}" target="_blank" rel="noreferrer noopener" title="${esc(r.url)}">${esc(r.url.replace(/^https?:\/\//, ''))}</a>
         ${r.error ? `<span class="merr">${esc(r.error)}</span>` : ''}
@@ -415,7 +423,7 @@
     root.innerHTML = '';
     for (const [act, label, tip] of acts) {
       const b = document.createElement('button');
-      b.className = act === 'remove' ? 'small ghost' : 'small';
+      b.className = act === 'remove' ? 'x' : 'sm';
       b.innerHTML = `<i class="fa-solid ${ACT_ICON[act]}"></i>${label ? ` ${esc(label)}` : ''}`;
       if (act === 'remove') b.setAttribute('aria-label', '一覧から消す');
       if (tip) b.title = tip;
@@ -426,7 +434,7 @@
           else if (act === 'resume') await api('POST', `/api/jobs/${job.id}/resume`);
           else if (act === 'preview') await api('POST', `/api/jobs/${job.id}/preview`);
           else if (act === 'remove') await api('DELETE', `/api/jobs/${job.id}`);
-        } catch (e) { alert(e.message); }
+        } catch (e) { toast(e.message, 'warn'); }
       };
       root.appendChild(b);
     }
@@ -915,6 +923,11 @@
   $('urls').addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') $('btnAdd').click();
   });
+  $('btnToggleDone').onclick = () => {
+    state.showDone = !state.showDone;
+    try { localStorage.setItem('pd.showDone', state.showDone ? '1' : '0'); } catch { /* ignore */ }
+    renderJobs();
+  };
   $('btnClearDone').onclick = async () => {
     const done = visibleJobs().filter((j) => j.status === 'done');
     for (const j of done) { try { await api('DELETE', `/api/jobs/${j.id}`); } catch { /* ignore */ } }

@@ -73,45 +73,58 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 .banner { margin: 12px 16px 0; padding: 10px 14px; border-radius: 8px; background: var(--need-soft); border: 1px solid color-mix(in srgb, var(--need) 40%, transparent); }
 
 main { max-width: 1100px; margin: 0 auto; padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 12px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
-.listhead { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; }
+.listhead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
 .listhead h2 { margin: 0; }
 .toggle { color: var(--ink-2); font-size: 12px; display: flex; gap: 4px; align-items: center; }
 .empty { color: var(--ink-2); padding: 16px; text-align: center; }
 
-.jobs { display: flex; flex-direction: column; gap: 6px; }
-.job { display: grid; grid-template-columns: 96px 20px 1fr 120px 150px; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
-.job .fav { width: 20px; height: 20px; object-fit: contain; border-radius: 4px; display: block; }
+/* ---- ジョブ一覧: 1 枚のリスト。状態は左の帯、進捗は行の下辺 ---- */
+.list { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.count { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink-3); }
+.jobs { display: flex; flex-direction: column; }
+.job { display: grid; grid-template-columns: 4px 22px minmax(0, 1fr) auto auto; gap: 0 12px; align-items: center;
+  padding: 10px 12px 10px 0; border-top: 1px solid var(--line); position: relative; }
+.jobs > .job:first-child { border-top: 0; }
+.job .stripe { align-self: stretch; }
+.job.resolving .stripe, .job.downloading .stripe { background: var(--amber); }
+.job.waiting_human .stripe { background: var(--need); }
+.job.failed .stripe { background: var(--bad); }
+.job .fav { width: 18px; height: 18px; object-fit: contain; border-radius: 4px; background: var(--panel-2); display: block; }
+.job.done .fav, .job.done .title { opacity: .7; }
 .job .name { min-width: 0; }
-.job .name .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
-.job .name .sub { color: var(--ink-2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.job .name .sub .host { color: var(--ink); font-weight: 600; }
-.job .name .sub .eng { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); font-size: 11px; line-height: 16px; vertical-align: 1px; }
-.job .name .sub .eng[hidden] { display: none; }
-.job .name .sub .eng.e-aria2 { border-color: var(--amber); color: var(--amber); }
-.job .name .sub .eng.e-jd2 { border-color: var(--ok); color: var(--ok); }
-.job .name .sub .eng.e-browser { border-color: var(--need); color: var(--need); }
-.job .name .sub .rest:not(:empty)::before { content: " · "; }
-.job .name .err { color: var(--bad); font-size: 12px; white-space: pre-wrap; }
-.job .name .human { color: var(--need); font-size: 12px; }
-.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 4px; }
-.bar > i { display: block; height: 100%; background: var(--amber); width: 0; transition: width .3s; }
-.job.done .bar > i { background: var(--ok); }
-.job.failed .bar > i { background: var(--bad); }
+.job .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.job .sub { display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; font-size: 12px; color: var(--ink-2); }
+.job .sub > [hidden] { display: none; }
+.job .sub .host { color: var(--ink); }
+.job .sub .eng { font-family: var(--mono); font-size: 10.5px; line-height: 15px; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink-3); }
+.job .sub .human { color: var(--need); }
+.job .sub .err { color: var(--bad); white-space: pre-wrap; }
+.job .mirbtn { border: 0; background: none; padding: 0; font: inherit; color: var(--amber); }
+.job .stat { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; color: var(--ink-2); }
+.job .stat .st { color: var(--ink-3); }
+.job.resolving .st, .job.downloading .st { color: var(--ink-2); }
+.job.waiting_human .st { color: var(--need); }
+.job.failed .st { color: var(--bad); }
+.job.done .st { color: var(--ok); }
+.job .acts { display: flex; gap: 4px; justify-content: flex-end; flex-wrap: wrap; }
+.job .acts button.sm { padding: 3px 8px; font-size: 12px; }
+.job .acts button.x { border: 0; background: none; color: var(--ink-3); padding: 3px 6px; }
+.job .acts button.x:hover { color: var(--ink); }
+.job .bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; }
+.job .bar > i { display: block; height: 100%; width: 0; transition: width .3s; background: transparent; }
+.job.downloading .bar > i { background: var(--amber); }
 .job.waiting_human .bar > i { background: var(--need); }
-.stat { font-size: 12px; color: var(--ink-2); text-align: right; white-space: nowrap; }
-.badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; display: inline-block; text-align: center; border: 1px solid var(--line); color: var(--ink-2); }
-.badge.downloading { border-color: var(--amber); color: var(--amber); }
-.badge.done { border-color: var(--ok); color: var(--ok); }
-.badge.failed { border-color: var(--bad); color: var(--bad); }
-.badge.waiting_human { border-color: var(--need); color: var(--need); }
-.badge.resolving { border-color: var(--amber); color: var(--amber); }
-.badge.waiting_site { border-color: var(--ink-3); color: var(--ink-3); }
-.job.waiting_site .bar > i { background: var(--ink-3); }
-.actions { display: flex; gap: 4px; justify-content: flex-end; }
-@media (max-width: 720px) {
-  .job { grid-template-columns: 80px 20px 1fr; }
-  .stat, .actions { grid-column: 1 / -1; text-align: left; justify-content: flex-start; }
+.donefoot { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel-2); border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-2); }
+.donefoot[hidden] { display: none; }
+.donefoot .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+button.quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+button.quiet:hover { color: var(--ink); }
+button.sm { padding: 3px 8px; font-size: 12px; }
+@media (max-width: 640px) {
+  .job { grid-template-columns: 4px 22px minmax(0, 1fr); }
+  .job .stat { grid-column: 3; text-align: left; }
+  .job .acts { grid-column: 3; justify-content: flex-start; }
 }
 
 dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); padding: 0; width: min(720px, 94vw); }
@@ -163,31 +176,23 @@ table.hosters tr.off td.mid:last-child, table.hosters tr.off td.mid { opacity: 1
 /* 右寄せの数字と日付がくっつくので、最後の成功だけ間を空ける */
 table.hosters td.nowrap:not(.mid) { padding-left: 14px; }
 
-/* ミラー候補の内訳。同時には 1 か所しか走らないので、
-   「今どこを試していて、どこが残っているか」を上から順に並べる */
-.job .mirbtn { margin-left: 6px; padding: 0 6px; font-size: 11px; line-height: 16px; border-radius: 999px; color: var(--ink-2); }
-.job .mirbtn[hidden] { display: none; }
-.job .mirs { grid-column: 1 / -1; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
-.mirlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.mir { display: grid; grid-template-columns: 22px 84px 120px minmax(0, 1fr); gap: 8px; align-items: baseline; font-size: 12px; }
-.mir .mnum { color: var(--ink-2); text-align: right; }
+/* ミラー候補の内訳。同時には 1 か所しか走らないので、上から「済んだ → 今 → 順番待ち」 */
+.job .mirs { grid-column: 2 / -1; margin-top: 6px; }
+.job .mirs[hidden] { display: none; }
+.mirlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.mir { display: grid; grid-template-columns: 14px 110px minmax(0, 1fr); gap: 0 8px; align-items: baseline; font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+.mir .mark { text-align: center; }
 .mir .mhoster { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mir .murl { color: var(--ink-2); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mir .murl { color: var(--ink-3); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mir .murl:hover { text-decoration: underline; }
-.mir .merr { grid-column: 4; color: var(--bad); white-space: pre-wrap; }
+.mir .merr { grid-column: 3; color: var(--bad); white-space: pre-wrap; }
 .mir .moff { color: var(--bad); }
-.mir .mbadge { font-size: 11px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-2); text-align: center; }
-.mir.s-active .mbadge { border-color: var(--amber); color: var(--amber); }
-.mir.s-active .mhoster { font-weight: 600; }
-.mir.s-done .mbadge { border-color: var(--ok); color: var(--ok); }
-.mir.s-failed .mbadge { border-color: var(--bad); color: var(--bad); }
-.mir.s-failed .mhoster, .mir.s-pending .mhoster { color: var(--ink-2); }
-@media (max-width: 720px) {
-  /* 折り返さないと候補ボタンが省略記号の向こうへ消える */
-  .job .name .sub { white-space: normal; }
-  .mir { grid-template-columns: 22px 84px minmax(0, 1fr); }
-  .mir .murl { grid-column: 2 / -1; }
-  .mir .merr { grid-column: 2 / -1; }
+.mir.s-failed .mark { color: var(--bad); }
+.mir.s-done .mark { color: var(--ok); }
+.mir.s-active .mark, .mir.s-active .mhoster, .mir.s-active .murl { color: var(--amber); }
+@media (max-width: 640px) {
+  .mir { grid-template-columns: 14px minmax(0, 1fr); }
+  .mir .murl, .mir .merr { grid-column: 2; }
 }
 
 .work { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }

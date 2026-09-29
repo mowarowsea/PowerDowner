@@ -62,15 +62,22 @@
       <div id="civitCards" class="civitcards"></div>
     </section>
 
-    <section class="card">
+    <section>
       <div class="listhead">
         <h2>ジョブ</h2>
+        <span id="jobCount" class="count"></span>
         <label class="toggle"><input type="checkbox" id="showAll"> 全ユーザー表示</label>
-        <div class="spacer"></div>
-        <button id="btnClearDone" class="ghost small">完了分を一覧から消す</button>
       </div>
-      <div id="jobs" class="jobs"></div>
-      <div id="jobsEmpty" class="empty" hidden>ジョブはありません</div>
+      <div class="list">
+        <div id="jobs" class="jobs"></div>
+        <div id="jobsEmpty" class="empty" hidden>ジョブはありません</div>
+        <div id="doneFoot" class="donefoot" hidden>
+          <span>完了 <span id="doneCount" class="num"></span> 件</span>
+          <span class="spacer"></span>
+          <button type="button" id="btnToggleDone" class="quiet sm"></button>
+          <button type="button" id="btnClearDone" class="quiet sm">一覧から消す</button>
+        </div>
+      </div>
     </section>
   </main>
 
