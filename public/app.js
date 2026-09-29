@@ -186,8 +186,8 @@
         <td class="nowrap" title="${esc(h.lastOkAt || '')}">${esc(fmtAgo(h.lastOkAt))}</td>
         <td class="mid"><input type="checkbox" data-act="use" ${h.enabled ? 'checked' : ''}></td>
         <td class="mid nowrap">
-          <button type="button" class="ghost small" data-act="up" ${i === 0 ? 'disabled' : ''} title="先に試す">↑</button>
-          <button type="button" class="ghost small" data-act="down" ${i === list.length - 1 ? 'disabled' : ''} title="後に回す">↓</button>
+          <button type="button" class="ghost small" data-act="up" ${i === 0 ? 'disabled' : ''} title="先に試す"><i class="fa-solid fa-arrow-up"></i></button>
+          <button type="button" class="ghost small" data-act="down" ${i === list.length - 1 ? 'disabled' : ''} title="後に回す"><i class="fa-solid fa-arrow-down"></i></button>
         </td>`;
       tr.querySelector('[data-act=use]').onchange = (e) => hostersAction(
         () => api('PATCH', `/api/hosters/${encodeURIComponent(h.key)}`, { enabled: e.target.checked }),
@@ -229,7 +229,7 @@
       tr.innerHTML = `
         <td><input type="text" data-field="name" value="${esc(u.name)}"></td>
         <td><input type="text" data-field="defaultDir" value="${esc(u.defaultDir ?? '')}" placeholder="未設定 (投入時にエラーになります)"></td>
-        <td><button type="button" class="small" data-act="save">保存</button> <button type="button" class="small ghost" data-act="del">削除</button></td>`;
+        <td><button type="button" class="small" data-act="save"><i class="fa-solid fa-check"></i> 保存</button> <button type="button" class="small ghost" data-act="del"><i class="fa-solid fa-trash-can"></i> 削除</button></td>`;
       tr.querySelector('[data-act=save]').onclick = async () => {
         const name = tr.querySelector('[data-field=name]').value;
         const defaultDir = tr.querySelector('[data-field=defaultDir]').value;
@@ -379,7 +379,7 @@
     }
 
     const open = state.openMirrors.has(job.id);
-    p.mirbtn.textContent = `候補 ${at}/${rows.length} ${open ? '▲' : '▼'}`;
+    p.mirbtn.innerHTML = `候補 ${at}/${rows.length} <i class="fa-solid fa-chevron-${open ? 'up' : 'down'}"></i>`;
     p.mirbtn.title = open ? 'アップローダごとの状況を閉じる' : 'アップローダごとの状況を見る';
     p.mirs.hidden = !open;
     if (!open) return;
@@ -399,14 +399,16 @@
       </li>`).join('');
   }
 
+  const ACT_ICON = { retry: 'fa-rotate-right', resume: 'fa-play', preview: 'fa-image', cancel: 'fa-stop', remove: 'fa-xmark' };
+
   function renderActions(root, job) {
     const acts = [];
-    if (job.status === 'failed' || job.status === 'canceled') acts.push(['retry', '最初から再試行', 'このジョブの候補を全部やり直す。失敗の記録を消して、優先度の高いアップローダから試し直します']);
+    if (job.status === 'failed' || job.status === 'canceled') acts.push(['retry', '再試行', 'このジョブの候補を全部やり直す。失敗の記録を消して、優先度の高いアップローダから試し直します']);
     if (job.status === 'waiting_human' && job.engine === 'jd2') acts.push(['resume', 'JD2 で再開', 'JD2 のスキップを解除して再挑戦させる']);
     const pv = job.meta && job.meta.preview;
     if (job.status === 'done' && pv && pv.state === 'failed') acts.push(['preview', '画像だけ取り直す', pv.error || '']);
     if (['queued', 'resolving', 'downloading', 'waiting_human', 'waiting_site'].includes(job.status)) acts.push(['cancel', '中止', '']);
-    acts.push(['remove', '×', '一覧から消す (ファイルは残ります)']);
+    acts.push(['remove', '', '一覧から消す (ファイルは残ります)']);
     const key = acts.map((a) => a[0]).join(',');
     if (root.dataset.key === key) return; // ボタンの顔ぶれが同じなら作り直さない
     root.dataset.key = key;
@@ -414,7 +416,8 @@
     for (const [act, label, tip] of acts) {
       const b = document.createElement('button');
       b.className = act === 'remove' ? 'small ghost' : 'small';
-      b.textContent = label;
+      b.innerHTML = `<i class="fa-solid ${ACT_ICON[act]}"></i>${label ? ` ${esc(label)}` : ''}`;
+      if (act === 'remove') b.setAttribute('aria-label', '一覧から消す');
       if (tip) b.title = tip;
       b.onclick = async () => {
         try {

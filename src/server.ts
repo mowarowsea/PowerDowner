@@ -61,6 +61,11 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
   const favicons = new Favicons(cfg.dataDir);
   await app.register(fastifyWebsocket);
   await app.register(fastifyStatic, { root: path.join(ROOT, 'public'), prefix: '/' });
+  // アイコンは node_modules から直接配る (リポジトリにはコピーしない)
+  await app.register(fastifyStatic, {
+    root: path.join(ROOT, 'node_modules/@fortawesome/fontawesome-free'),
+    prefix: '/vendor/fa/', decorateReply: false,
+  });
 
   app.setErrorHandler((raw, req, reply) => {
     const err = raw as { statusCode?: number; message?: string };
