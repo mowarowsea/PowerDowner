@@ -192,3 +192,27 @@ test('rename.folder が false ならフォルダを掘らずリネームだけ�
 
   assert.ok(fs.existsSync(path.join(dest, '[著者] 作品名 第03巻.rar')));
 });
+
+test('落としている最中は、完了後に付く予定の名前を画面へ添える', async () => {
+  const { db, queue, user, dest } = await harness();
+  const job = finished(db, user.id, {
+    id: 'j11', filename: 'RTAè£ç v07.rar', dest,
+    title: '作品名', author: '著者', volumeFrom: 7, volumeTo: 7,
+  });
+
+  assert.equal(queue.present(job).plannedName, '[著者] 作品名 第07巻.rar');
+
+  // 完了後は台帳のファイル名そのものが正しい名前なので、予定名は出さない
+  queue.onDone('j11', job.filename);
+  assert.equal(queue.present(db.getJob('j11')!).plannedName, null);
+});
+
+test('リネームしない設定なら予定名は出さない', async () => {
+  const { db, queue, user, dest } = await harness({ enabled: false });
+  const job = finished(db, user.id, {
+    id: 'j12', filename: 'dl.rar', dest,
+    title: '作品名', author: '著者', volumeFrom: 3, volumeTo: 3,
+  });
+
+  assert.equal(queue.present(job).plannedName, null);
+});

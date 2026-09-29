@@ -92,7 +92,7 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
 
   const state = () => ({
     users: db.listUsers(),
-    jobs: db.listJobs({ limit: 300 }),
+    jobs: db.listJobs({ limit: 300 }).map((j) => queue.present(j)),
     engines: [aria2.status(), jd2.status(), browser.status()],
     hosters: db.listHosters(),
     settings: {

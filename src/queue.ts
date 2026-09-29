@@ -9,7 +9,7 @@ import type { BrowserEngine } from './engines/browser.js';
 import type { Router } from './router.js';
 import type { Job, ResolvedDownload, User, MergeRecord } from './types.js';
 import { decideItems, type ItemInput } from './library.js';
-import { fitPath, planName, uniqueName, type NameInput } from './naming.js';
+import { fitPath, planName, uniqueName, type NameInput, type NamePlan } from './naming.js';
 import { hostOf, pickFreeHostMirror, sortByPriority } from './mirrors.js';
 import { hosterKeyOf, newHosterFor, priorityDomains, splitByEnabled } from './hosters.js';
 import { bus, log } from './events.js';
@@ -357,19 +357,8 @@ export class Queue {
    */
   private relocate(job: Job, filePath: string): string {
     const current = path.basename(filePath);
-    if (!this.cfg.rename.enabled) return current;
-
-    // 作品名と巻数は**投入時に読んだ解釈** (ジョブに焼いてある) を正とする。
-    // 落ちてきたファイル名から読み直すと、URL 由来のゴミが作品名に混ざる
-    const meta = (job.meta.item ?? {}) as { title?: string | null; author?: string | null };
-    const input: NameInput = {
-      author: meta.author ?? null,
-      title: meta.title ?? null,
-      volumeFrom: job.volumeFrom,
-      volumeTo: job.volumeTo,
-    };
-
-    const plan = fitPath(job.destDir, planName(current, input, { folder: this.cfg.rename.folder }), input);
+    const plan = this.planFor(job, current);
+    if (!plan) return current;
     const targetDir = plan.folder ? path.join(job.destDir, plan.folder) : job.destDir;
 
     try {
@@ -387,6 +376,43 @@ export class Queue {
       log(`[queue] 整理できませんでした (落ちた名前のまま置きます): ${current} (${(e as Error).message})`);
       return current;
     }
+  }
+
+  /**
+   * 完了時に relocate が付ける名前を、先に決めておく。リネームしない設定なら null。
+   * 画面に出す予定名 (present) と実際のリネームで**同じ計算を使う**ためにここへ寄せてある。
+   */
+  private planFor(job: Job, current: string): NamePlan | null {
+    if (!this.cfg.rename.enabled) return null;
+    // CivitAI のモデルは名前を変えない (onDone を参照)
+    if (job.meta.civitai) return null;
+
+    // 作品名と巻数は**投入時に読んだ解釈** (ジョブに焼いてある) を正とする。
+    // 落ちてきたファイル名から読み直すと、URL 由来のゴミが作品名に混ざる
+    const meta = (job.meta.item ?? {}) as { title?: string | null; author?: string | null };
+    const input: NameInput = {
+      author: meta.author ?? null,
+      title: meta.title ?? null,
+      volumeFrom: job.volumeFrom,
+      volumeTo: job.volumeTo,
+    };
+    return fitPath(job.destDir, planName(current, input, { folder: this.cfg.rename.folder }), input);
+  }
+
+  /**
+   * 画面へ出す形。落としている最中は、ファイル名の代わりに**完了後に付く予定の名前**を
+   * `plannedName` に添える。アップローダのファイル名は文字化けや URL 由来のゴミが多く、
+   * 何の巻を落としているのか読めないため。同名回避の ` (2)` は完了時にしか決まらないので付けない。
+   */
+  present(job: Job): Job & { plannedName: string | null } {
+    let plannedName: string | null = null;
+    if (job.status !== 'done' && job.filename) {
+      try {
+        const plan = this.planFor(job, job.filename);
+        if (plan && plan.file !== job.filename) plannedName = plan.file;
+      } catch { /* 予定名は飾り。決められなければ落ちてくる名前をそのまま出す */ }
+    }
+    return { ...job, plannedName };
   }
 
   /** JD2 が掘ったパッケージフォルダなど、空になった 1 段を片付ける。保存先そのものは消さない */
@@ -629,7 +655,7 @@ export class Queue {
   }
 
   private emit(job: Job | null): void {
-    if (job) bus.emit('job', job);
+    if (job) bus.emit('job', this.present(job));
   }
 
   // ---- 投入 --------------------------------------------------------------

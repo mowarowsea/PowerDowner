@@ -355,9 +355,10 @@
 
     // CivitAI は再試行でファイル名が消えても、何のモデルかはモデル名で分かるようにする
     const civ = job.meta && job.meta.civitai;
-    p.title.textContent = job.filename || (civ ? `${civ.modelName} / ${civ.versionName}` : job.url);
+    // 落としている最中は、完了後にリネームされる予定の名前を出す (元の名前はツールチップへ)
+    p.title.textContent = job.plannedName || job.filename || (civ ? `${civ.modelName} / ${civ.versionName}` : job.url);
     // 保存先は行に出さず、URL と一緒にここへ
-    p.title.title = [job.url, job.destDir].filter(Boolean).join('\n');
+    p.title.title = [job.plannedName ? job.filename : '', job.url, job.destDir].filter(Boolean).join('\n');
 
     p.host.textContent = host;
     p.eng.textContent = job.engine ? (ENGINE_LABEL[job.engine] || job.engine) : '';
