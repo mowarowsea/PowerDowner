@@ -62,7 +62,7 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 .error { color: var(--bad); margin-top: 8px; white-space: pre-wrap; }
 
 .brand { display: flex; align-items: center; gap: 8px; margin-right: auto; }
-.brand img { display: block; width: 24px; height: 24px; }
+.brand img { display: block; width: 36px; height: 36px; }
 .brand h1 { font-size: 16px; font-weight: 600; color: var(--ink); }
 .top { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
 .top .spacer { display: none; }
