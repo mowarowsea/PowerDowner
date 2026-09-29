@@ -63,7 +63,9 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 
 .brand { display: flex; align-items: center; gap: 8px; margin-right: auto; }
 .brand img { display: block; width: 36px; height: 36px; }
-.brand h1 { font-size: 16px; font-weight: 600; color: var(--ink); }
+.brand h1 { font-size: 24px; line-height: 1; font-weight: 600; color: var(--ink); }
+/* ロゴ横は DryEyes / pinax と揃える: 36px のマーク、文字 24px (スマホは 20px) */
+@media (max-width: 640px) { .brand { gap: 6px; } .brand h1 { font-size: 20px; } }
 .top { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
 .top .spacer { display: none; }
 .engines { display: flex; gap: 8px; align-items: center; }
