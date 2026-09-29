@@ -117,23 +117,30 @@
     return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
   }
 
+  // 「全員」は '*' で保存する。userId は直前の値を残す (見るだけで、投入先にはならない)
   function saveUserPick() {
-    try { localStorage.setItem('pd.userId', String(state.userId ?? '')); } catch { /* ignore */ }
+    try { localStorage.setItem('pd.userId', state.showAll ? '*' : String(state.userId ?? '')); } catch { /* ignore */ }
   }
   function loadUserPick() {
-    try { const v = localStorage.getItem('pd.userId'); return v ? Number(v) : null; } catch { return null; }
+    try {
+      const v = localStorage.getItem('pd.userId');
+      if (v === '*') { state.showAll = true; return null; }
+      return v ? Number(v) : null;
+    } catch { return null; }
   }
 
   // ---- rendering ---------------------------------------------------------
+  /** 生きていれば点だけ。落ちた業者だけ名前を出す */
   function renderEngines() {
     const el = $('engines');
     el.innerHTML = '';
     for (const name of ['aria2', 'jd2', 'browser']) {
       const s = state.engines[name];
+      const on = !!(s && s.available);
       const span = document.createElement('span');
-      span.className = 'pill ' + (s && s.available ? 'on' : 'off');
-      span.textContent = ENGINE_LABEL[name];
-      span.title = s ? s.detail : '不明';
+      span.className = `eng-dot ${on ? 'on' : 'off'}`;
+      if (!on) span.textContent = ENGINE_LABEL[name];
+      span.title = `${ENGINE_LABEL[name]}: ${s ? s.detail : '不明'}`;
       el.appendChild(span);
     }
   }
@@ -223,7 +230,10 @@
       state.userId = state.users.length ? state.users[0].id : null;
       saveUserPick();
     }
-    sel.value = state.userId === null ? '' : String(state.userId);
+    const all = document.createElement('option');
+    all.value = '*'; all.textContent = '全員';
+    sel.appendChild(all);
+    sel.value = state.showAll ? '*' : (state.userId === null ? '' : String(state.userId));
 
     const body = $('usersBody');
     body.innerHTML = '';
@@ -585,7 +595,8 @@
   async function submitCivitCard(card) {
     if (card.busy || !card.data) return;
     card.error = '';
-    if (state.userId === null) card.error = '先に「ユーザー / 設定」からユーザーを登録してください';
+    if (state.showAll) card.error = 'ユーザーを選んでください';
+    else if (state.userId === null) card.error = '先に「ユーザー / 設定」からユーザーを登録してください';
     else if (!card.dir.trim()) card.error = '保存先を選んでください';
     if (card.error) { renderCivit(); return; }
     card.busy = true;
@@ -753,11 +764,11 @@
 
   // ---- events ------------------------------------------------------------
   $('userSelect').onchange = (e) => {
-    state.userId = e.target.value ? Number(e.target.value) : null;
+    if (e.target.value === '*') state.showAll = true;
+    else { state.showAll = false; state.userId = e.target.value ? Number(e.target.value) : null; }
     saveUserPick();
     renderJobs();
   };
-  $('showAll').onchange = (e) => { state.showAll = e.target.checked; renderJobs(); };
   $('btnUsers').onclick = () => { $('dialogError').hidden = true; $('usersDialog').showModal(); };
   $('btnHosters').onclick = () => {
     $('hostersDialog').showModal();
@@ -787,6 +798,16 @@
     if (bad.length) { $('addError').textContent = bad.join('\n'); $('addError').hidden = false; }
   }
 
+  function setWorkBox(open) {
+    $('workBox').hidden = !open;
+    $('btnWork').innerHTML = `<i class="fa-solid fa-${open ? 'minus' : 'plus'}"></i> 作品として登録`;
+    if (!open) hideShelf();
+  }
+  $('btnWork').onclick = () => {
+    setWorkBox($('workBox').hidden);
+    if (!$('workBox').hidden) $('workTitle').focus();
+  };
+
   $('btnAdd').onclick = async () => {
     const err = $('addError');
     err.hidden = true;
@@ -794,6 +815,7 @@
     const urls = takeCivitai($('urls').value);
     $('urls').value = urls;
     if (!urls.trim()) return;
+    if (state.showAll) { err.textContent = 'ユーザーを選んでください'; err.hidden = false; return; }
     if (state.userId === null) { err.textContent = '先に「ユーザー / 設定」からユーザーを登録してください'; err.hidden = false; return; }
     const title = $('workTitle').value.trim();
     $('btnAdd').disabled = true;
@@ -812,7 +834,7 @@
         // 作品名と著者は続けて使うので残す。巻数だけ消す — 残すと次の投入が同じ巻になり、
         // 台帳で弾かれて「なぜか落ちてこない」ことになる
         $('workVolume').value = '';
-        $('workBox').open = true;  // 畳んだまま効き続けるのを防ぐ
+        setWorkBox(true);  // 畳んだまま効き続けるのを防ぐ
         reportWork(r);
         return;
       }

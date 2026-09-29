@@ -13,13 +13,10 @@
 </head>
 <body>
   <header class="top">
-    <div class="brand"><img src="/favicon.svg" alt="" width="26" height="26"><h1>PowerDowner</h1></div>
+    <div class="brand"><img src="/favicon.svg" alt="" width="24" height="24"><h1>PowerDowner</h1></div>
     <div class="engines" id="engines"></div>
     <div class="spacer"></div>
-    <label class="userpick">
-      <span>ユーザー</span>
-      <select id="userSelect"></select>
-    </label>
+    <select id="userSelect" aria-label="ユーザー"></select>
     <button id="btnHosters" class="ghost">アップローダ</button>
     <button id="btnUsers" class="ghost">ユーザー / 設定</button>
   </header>
@@ -29,24 +26,24 @@
   <div id="captchaBanner" class="banner" hidden></div>
 
   <main>
-    <section class="card add">
+    <section class="add">
       <textarea id="urls" rows="3" placeholder="URL を貼る (複数行 OK)"></textarea>
-      <details id="workBox" class="work">
-        <summary>作品として登録する (DryEyes を通さない)</summary>
-        <!-- 作品名・著者は打つと棚 (pinax) の候補を出す。棚と 1 文字違うと別フォルダに割れるので、
-             既にある綴りを選べるようにしておく。巻数は候補に表示するだけで欄には入れない -->
-        <div class="suggestwrap">
-          <div class="row">
-            <input id="workTitle" type="text" placeholder="作品名 (入れると作品として登録される)" autocomplete="off">
-            <input id="workAuthor" type="text" placeholder="著者 (任意)" autocomplete="off">
-            <input id="workVolume" type="text" class="vol" placeholder="巻数 (例: 3 / 1-7)">
-          </div>
-          <ul id="shelfHits" class="shelfhits" role="listbox" hidden></ul>
+      <!-- 作品名・著者は打つと棚 (pinax) の候補を出す。棚と 1 文字違うと別フォルダに割れるので、
+           既にある綴りを選べるようにしておく。巻数は候補に表示するだけで欄には入れない -->
+      <div id="workBox" class="work suggestwrap" hidden>
+        <div class="workrow">
+          <input id="workTitle" type="text" placeholder="作品名" autocomplete="off">
+          <input id="workAuthor" type="text" placeholder="著者" autocomplete="off">
+          <input id="workVolume" type="text" class="vol" placeholder="巻数 (例: 3 / 1-7)">
+          <input id="destDir" type="text" class="dest" placeholder="保存先 (空欄なら既定)">
         </div>
+        <ul id="shelfHits" class="shelfhits" role="listbox" hidden></ul>
         <p id="shelfNote" class="hint small shelfnote" hidden></p>
-      </details>
-      <div class="row">
-        <input id="destDir" type="text" placeholder="保存先を上書き (空欄ならユーザーの既定フォルダ)">
+      </div>
+      <div class="actrow">
+        <button type="button" id="btnWork" class="quiet sm" title="作品名を入れると [著者] 作品名 のフォルダへ整理して保存する"><i class="fa-solid fa-plus"></i> 作品として登録</button>
+        <span class="spacer"></span>
+        <span class="kbd">Ctrl+Enter</span>
         <button id="btnAdd" class="primary">追加</button>
       </div>
       <div id="addError" class="error" hidden></div>
@@ -66,7 +63,6 @@
       <div class="listhead">
         <h2>ジョブ</h2>
         <span id="jobCount" class="count"></span>
-        <label class="toggle"><input type="checkbox" id="showAll"> 全ユーザー表示</label>
       </div>
       <div class="list">
         <div id="jobs" class="jobs"></div>
