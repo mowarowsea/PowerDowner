@@ -243,7 +243,7 @@ table.hosters td.nowrap:not(.mid) { padding-left: 14px; }
 .civithead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .civithead h2 { margin: 0; }
 .civitcards { display: flex; flex-direction: column; gap: 8px; }
-.ccard { display: grid; grid-template-columns: 128px 1fr auto; gap: 14px; background: var(--panel); border: 1px solid var(--amber); border-radius: 10px; padding: 12px 14px; }
+.ccard { display: grid; grid-template-columns: 128px 1fr auto; gap: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; }
 .ccthumb { width: 128px; height: 176px; border-radius: 8px; overflow: hidden; background: var(--line); display: flex; align-items: center; justify-content: center; color: var(--ink-2); font-size: 12px; }
 .ccthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .ccmain { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -263,9 +263,9 @@ table.hosters td.nowrap:not(.mid) { padding-left: 14px; }
 .ccimg.on { border-color: var(--amber); }
 .ccimg.none { font-size: 11px; color: var(--ink-2); border: 2px dashed var(--line); background: transparent; }
 .ccimg.none.on { border-color: var(--amber); border-style: solid; color: var(--ink); }
-.ccnames { font-family: var(--mono); font-size: 12px; padding: 6px 8px; border-radius: 6px; background: var(--bg); overflow-wrap: anywhere; }
+.ccnames { font-family: var(--mono); font-size: 12px; padding: 6px 8px; border-radius: 6px; background: var(--panel-2); overflow-wrap: anywhere; }
 .ccnames .ccdir { color: var(--ink-2); }
-.ccwarn { color: var(--need); font-size: 12px; }
+.ccwarn { color: var(--ink-2); font-size: 12px; }
 .ccbtns { display: flex; flex-direction: column; gap: 8px; align-items: stretch; justify-content: flex-end; }
 @media (max-width: 640px) {
   .ccard { grid-template-columns: 1fr; }

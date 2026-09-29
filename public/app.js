@@ -720,7 +720,7 @@
           ${file ? `<div>→ ${esc(file.name)}</div>` : ''}
           <div>→ ${card.imageUrl ? `${esc(stem)}.png <span class="hint small">(jpg の画像なら .jpg)</span>` : '<span class="hint small">画像は保存しない</span>'}</div>
         </div>
-        ${exist.length ? `<div class="ccwarn">同じ名前のファイルがもうあります: ${exist.map(esc).join(', ')}<br>このまま追加すると「 (2)」付きの別ファイルになります</div>` : ''}
+        ${exist.length ? `<div class="ccwarn"><i class="fa-solid fa-triangle-exclamation"></i> 同じ名前のファイルがもうあります: ${exist.map(esc).join(', ')}<br>このまま追加すると「 (2)」付きの別ファイルになります</div>` : ''}
         ${card.error ? `<div class="error">${esc(card.error)}</div>` : ''}
       </div>
       <div class="ccbtns">
