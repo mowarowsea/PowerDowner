@@ -6,9 +6,14 @@
     // ミラー内訳を開いているジョブ。進捗で行を作り直しても開きっぱなしを保つ
     openMirrors: new Set(),
     // 完了ジョブは既定で畳む
-    showDone: false,
+    showDone: false, showLog: false,
+    // JD2 が知らせてきた CAPTCHA の待ち (要対応バナーの材料)
+    captcha: null,
   };
-  try { state.showDone = localStorage.getItem('pd.showDone') === '1'; } catch { /* ignore */ }
+  try {
+    state.showDone = localStorage.getItem('pd.showDone') === '1';
+    state.showLog = localStorage.getItem('pd.showLog') === '1';
+  } catch { /* ignore */ }
   const LOG_MAX = 80;
   const logLines = [];
 
@@ -273,6 +278,7 @@
     const list = state.showDone ? [...active, ...done] : active;
     const root = $('jobs');
     $('jobsEmpty').hidden = all.length > 0;
+    renderNeed(all);
     $('jobCount').textContent = all.length ? String(all.length) : '';
     $('doneFoot').hidden = done.length === 0;
     $('doneCount').textContent = String(done.length);
@@ -448,6 +454,8 @@
   }
 
   function renderLog() {
+    $('log').hidden = !state.showLog;
+    $('btnLog').innerHTML = `<i class="fa-solid fa-terminal"></i> ${state.showLog ? 'ログを隠す' : 'ログを見る'}`;
     $('log').textContent = logLines.join('\n');
   }
 
@@ -501,10 +509,29 @@
   }
 
   function showCaptcha(n) {
+    state.captcha = n && n.pending > 0 ? n : null;
+    renderNeed();
+  }
+
+  /**
+   * 「人の手が要る」ものの受け口。JD2 の CAPTCHA と waiting_human のジョブを 1 か所に束ねる。
+   * 数えるのは表示中のユーザーの分だけ (「全員」なら全部)
+   */
+  function renderNeed(list = visibleJobs()) {
     const b = $('captchaBanner');
-    if (!n || n.pending === 0) { b.hidden = true; return; }
-    b.textContent = `JD2 が CAPTCHA の入力を待っています (${n.hosts.join(', ')})。JD2 のウィンドウで解いてください。解けば自動で再開します。`;
-    b.hidden = false;
+    const lines = [];
+    const n = state.captcha;
+    if (n) {
+      lines.push(`JD2 が CAPTCHA の入力を待っています (${esc(n.hosts.join(', '))})。 <small>JD2 のウィンドウで解いてください。解けば自動で再開します。</small>`);
+    }
+    const waiting = list.filter((j) => j.status === 'waiting_human');
+    if (waiting.length === 1) {
+      lines.push(`${esc(hostOf(waiting[0].url))} の人間判定を待っています。 <small>ブラウザのウィンドウで通してください。通れば自動で続きます。</small>`);
+    } else if (waiting.length > 1) {
+      lines.push(`${waiting.length} 件のジョブが人間の操作を待っています。 <small>ブラウザのウィンドウで通してください。通れば自動で続きます。</small>`);
+    }
+    b.hidden = lines.length === 0;
+    b.innerHTML = lines.map((l) => `<div class="line"><span class="tag">要対応</span><span>${l}</span></div>`).join('');
   }
 
   // ---- CivitAI の確認カード ----------------------------------------------
@@ -953,6 +980,11 @@
   $('urls').addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') $('btnAdd').click();
   });
+  $('btnLog').onclick = () => {
+    state.showLog = !state.showLog;
+    try { localStorage.setItem('pd.showLog', state.showLog ? '1' : '0'); } catch { /* ignore */ }
+    renderLog();
+  };
   $('btnToggleDone').onclick = () => {
     state.showDone = !state.showDone;
     try { localStorage.setItem('pd.showDone', state.showDone ? '1' : '0'); } catch { /* ignore */ }
@@ -965,5 +997,6 @@
 
   // ---- boot --------------------------------------------------------------
   state.userId = loadUserPick();
+  renderLog();
   connect();
 })();

@@ -22,9 +22,9 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <div id="captchaBanner" class="banner" hidden></div>
-
   <main>
+    <div id="captchaBanner" class="need" hidden></div>
+
     <section class="add">
       <textarea id="urls" rows="3" placeholder="URL を貼る (複数行 OK)"></textarea>
       <!-- 作品名・著者は打つと棚 (pinax) の候補を出す。棚と 1 文字違うと別フォルダに割れるので、
@@ -137,7 +137,10 @@
     </form>
   </dialog>
 
-  <footer class="log"><pre id="log"></pre></footer>
+  <footer class="log">
+    <button type="button" id="btnLog" class="quiet sm"><i class="fa-solid fa-terminal"></i> ログを見る</button>
+    <pre id="log" hidden></pre>
+  </footer>
 
   <script src="/app.js"></script>
 </body>

@@ -73,7 +73,13 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 @media (max-width: 640px) { .engines .eng-dot.on { display: none; } }
 
 .pill { font-size: 11px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-2); }
-.banner { margin: 12px 16px 0; padding: 10px 14px; border-radius: 8px; background: var(--need-soft); border: 1px solid color-mix(in srgb, var(--need) 40%, transparent); }
+.banner { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); }
+/* 画面で紫を使うのは、この受け口と waiting_human の行だけ */
+.need { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; border-radius: 8px; background: var(--need-soft); border: 1px solid color-mix(in srgb, var(--need) 40%, transparent); }
+.need[hidden] { display: none; }
+.need .line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.need .tag { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--need); border: 1px solid var(--need); border-radius: 4px; padding: 0 6px; }
+.need small { color: var(--ink-2); font-size: 12px; }
 
 main { max-width: 960px; margin: 0 auto; padding: 16px 16px 24px; display: flex; flex-direction: column; gap: 14px; }
 .listhead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
@@ -142,8 +148,10 @@ table.users td:last-child { width: 130px; white-space: nowrap; }
 
 .nowrap { white-space: nowrap; }
 
-.log { max-width: 960px; margin: 0 auto; padding: 0 16px 24px; }
-.log pre { margin: 0; font-size: 11px; color: var(--ink-2); max-height: 140px; overflow: auto; white-space: pre-wrap; }
+.log { max-width: 960px; margin: 0 auto; padding: 0 16px 24px; text-align: right; }
+.log button { color: var(--ink-3); }
+.log pre[hidden] { display: none; }
+.log pre { text-align: left; margin: 8px 0 0; font-size: 11px; color: var(--ink-2); max-height: 140px; overflow: auto; white-space: pre-wrap; }
 
 /* ---- アップローダの台帳 -------------------------------------------------- */
 dialog { width: min(860px, 96vw); box-shadow: var(--shadow); }
