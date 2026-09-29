@@ -25,6 +25,17 @@
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
     return `${v.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
   };
+  /** 残り時間をざっくり。速度は揺れるので分・10 分・時間単位に丸める */
+  const fmtEta = (sec) => {
+    if (!isFinite(sec) || sec <= 0) return '';
+    if (sec < 60) return 'あと1分未満';
+    if (sec < 3600) return `あと${Math.round(sec / 60)}分`;
+    const m = Math.round(sec / 600) * 10;
+    const h = Math.floor(m / 60);
+    return h >= 10 ? `あと${Math.round(sec / 3600)}時間` : `あと${h}時間${m % 60 ? `${m % 60}分` : ''}`;
+  };
+  // 瞬間速度だと目安が暴れるので、ジョブごとに均した速度を持っておく
+  const avgSpeed = new Map();
   const STATUS_LABEL = {
     queued: '待機', resolving: '解決中', downloading: 'DL中', waiting_human: '人間待ち', waiting_site: 'サイト制限待ち',
     done: '完了', failed: '失敗', canceled: '中止',
@@ -384,8 +395,17 @@
     const running = job.status === 'downloading' || job.status === 'waiting_human';
     p.sz.textContent = running ? `${fmtBytes(job.bytesDone)} / ${job.bytesTotal ? fmtBytes(job.bytesTotal) : '?'}`
       : job.status === 'done' ? fmtBytes(job.bytesTotal || job.bytesDone) : '';
-    p.st.textContent = job.status === 'downloading' ? `${fmtBytes(job.speed)}/s`
-      : (STATUS_LABEL[job.status] || job.status);
+    if (job.status === 'downloading') {
+      const prev = avgSpeed.get(job.id);
+      const sp = prev == null ? (job.speed || 0) : prev * 0.8 + (job.speed || 0) * 0.2;
+      avgSpeed.set(job.id, sp);
+      const left = job.bytesTotal > job.bytesDone ? job.bytesTotal - job.bytesDone : 0;
+      const eta = left && sp > 0 ? fmtEta(left / sp) : '';
+      p.st.textContent = `${fmtBytes(job.speed)}/s${eta ? ` · ${eta}` : ''}`;
+    } else {
+      avgSpeed.delete(job.id);
+      p.st.textContent = STATUS_LABEL[job.status] || job.status;
+    }
 
     renderActions(p.actions, job);
   }
