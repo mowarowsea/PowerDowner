@@ -134,6 +134,15 @@ const MAX_ITEMS_PER_REQUEST = 20;
 export class Queue {
   private pumping = false;
   private pumpAgain = false;
+  /**
+   * 投入 (addItems) を 1 件ずつ通すための列。
+   *
+   * addItems は「手元のジョブを見る → 棚に聞く (待つ) → ジョブを作る」の順なので、
+   * 別サイトの監視から同じ巻がほぼ同時に届くと、両方が「落とし中のジョブは無い」と見たまま
+   * 棚の返事を待ち、同じ巻のジョブが 2 本できる (2026-10-01 に 逃げ上手の若君 23 巻で起きた)。
+   * 前の投入がジョブを作り終えてから次の投入が手元を見るように、ここで順番に並べる
+   */
+  private itemsChain: Promise<unknown> = Promise.resolve();
 
   constructor(
     private cfg: Config,
@@ -809,7 +818,14 @@ export class Queue {
    * 棚 (pinax) に聞いて取得済みならスキップ、落とし中のジョブがあれば合流させる
    * (docs/ROADMAP.md 2.5)。
    */
-  async addItems(input: AddItemsInput): Promise<AddItemsResult> {
+  addItems(input: AddItemsInput): Promise<AddItemsResult> {
+    const run = this.itemsChain.then(() => this.addItemsNow(input));
+    // 前の投入が失敗しても列は止めない (失敗はその呼び出し元へ返る)
+    this.itemsChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async addItemsNow(input: AddItemsInput): Promise<AddItemsResult> {
     const { user, dest } = this.resolveDest(input.userId, input.destDir);
 
     const all = Array.isArray(input.items) ? input.items : [];
