@@ -389,10 +389,11 @@ export class Queue {
 
     // 作品名と巻数は**投入時に読んだ解釈** (ジョブに焼いてある) を正とする。
     // 落ちてきたファイル名から読み直すと、URL 由来のゴミが作品名に混ざる
-    const meta = (job.meta.item ?? {}) as { title?: string | null; author?: string | null };
+    const meta = (job.meta.item ?? {}) as { title?: string | null; author?: string | null; shelfFolder?: string | null };
     const input: NameInput = {
       author: meta.author ?? null,
       title: meta.title ?? null,
+      shelfFolder: meta.shelfFolder ?? null,
       volumeFrom: job.volumeFrom,
       volumeTo: job.volumeTo,
     };
@@ -894,6 +895,8 @@ export class Queue {
             author: meta.author ?? null,
             volume: meta.volume ?? null,
             rawText: meta.rawText ?? null,
+            // 棚に既にあるこの作品のフォルダ。完了時のリネームはここへ入れる (naming.ts)
+            shelfFolder: decision.kind === 'new' ? decision.shelfFolder ?? null : null,
           },
           source: item.source ?? null,
           sourceKey,

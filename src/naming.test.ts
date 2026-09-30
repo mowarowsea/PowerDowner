@@ -129,3 +129,49 @@ test('パスが長すぎるなら作品名を削って収める', () => {
   // 削っても巻数と拡張子は残す
   assert.ok(fitted.file.endsWith('第01巻.rar'), fitted.file);
 });
+
+/**
+ * 棚の綴りをそのまま使う。NFKC で畳むと `～` が `~` に、`！` が `!` になり、
+ * 棚にある `[著者] 作品名` と 1 文字ずれた別フォルダを掘って同じ作品が 2 か所に割れる。
+ */
+test('全角の記号を半角へ畳まない (棚のフォルダと割れないように)', () => {
+  const plan = planName('dl.rar', {
+    author: '甘岸久弥', title: '魔導具師ダリヤはうつむかない ～Dahliya Wilts No More～', volumeFrom: 3, volumeTo: 3,
+  });
+  assert.equal(plan.folder, '[甘岸久弥] 魔導具師ダリヤはうつむかない ～Dahliya Wilts No More～');
+  assert.equal(sanitizeSegment('ヒナまつり！'), 'ヒナまつり！');
+  assert.equal(sanitizeSegment('ＡＢＣ　物語'), 'ＡＢＣ　物語');
+  // 読み戻したキーは畳んだものと同じなので、所持の判定は揺れない
+  assert.equal(seriesKeyOf(parseFilename(plan.file).title), seriesKeyOf('魔導具師ダリヤはうつむかない ~Dahliya Wilts No More~'));
+});
+
+test('棚に既にあるフォルダがあれば、組み立てずにそこへ入れる', () => {
+  const plan = planName('dl.rar', {
+    author: '柳野かなた', title: '最果てのパラディン', volumeFrom: 3, volumeTo: 3,
+    shelfFolder: '[奥橋睦×柳野かなた×輪くすさが] 最果てのパラディン',
+  });
+  assert.equal(plan.folder, '[奥橋睦×柳野かなた×輪くすさが] 最果てのパラディン');
+  assert.equal(plan.file, '[奥橋睦×柳野かなた×輪くすさが] 最果てのパラディン 第03巻.rar');
+});
+
+test('棚のフォルダの (完) はファイル名の頭には書かない', () => {
+  const plan = planName('dl.part2.rar', { title: '日常', volumeFrom: 10, volumeTo: 10, shelfFolder: '[あらゐけいいち] 日常(完)' });
+  assert.equal(plan.folder, '[あらゐけいいち] 日常(完)');
+  assert.equal(plan.file, '[あらゐけいいち] 日常 第10巻.part2.rar');
+});
+
+test('棚のフォルダ名が道の区切りなどを含むなら使わない', () => {
+  for (const bad of ['..', 'a/b', 'a\\b', 'x:y']) {
+    const plan = planName('dl.rar', { author: '著者', title: '作品名', volumeFrom: 1, volumeTo: 1, shelfFolder: bad });
+    assert.equal(plan.folder, '[著者] 作品名', bad);
+  }
+});
+
+test('棚のフォルダでもパスに収まらなければ、組み立てる側へ戻して詰める', () => {
+  const base = '\\\\192.168.3.30\\disk1_pt1\\manga';
+  const shelfFolder = `[著者] ${'あ'.repeat(105)}`;
+  const input = { author: '著者', title: 'あ'.repeat(105), volumeFrom: 1, volumeTo: 1, shelfFolder };
+  const fitted = fitPath(base, planName('dl.rar', input), input);
+  assert.ok(path.join(base, fitted.folder ?? '', fitted.file).length <= 240);
+  assert.ok(fitted.file.endsWith('第01巻.rar'), fitted.file);
+});

@@ -31,8 +31,11 @@ export interface ItemInput {
 }
 
 export type ItemDecision =
-  /** 新規に落とす。missing は所持済みを除いた未取得の巻 (範囲判定に参加しない時は null) */
-  | { kind: 'new'; parsed: ParsedItem; missing: number[] | null }
+  /**
+   * 新規に落とす。missing は所持済みを除いた未取得の巻 (範囲判定に参加しない時は null)。
+   * shelfFolder は棚に既にあるこの作品のフォルダ名で、リネームがそこへ入れる (naming.ts)
+   */
+  | { kind: 'new'; parsed: ParsedItem; missing: number[] | null; shelfFolder?: string | null }
   /** 既に持っているので落とさない */
   | { kind: 'skip'; parsed: ParsedItem; reason: string }
   /** 落とし中のジョブと同じもの。ミラー候補として合流させる */
@@ -90,6 +93,17 @@ export async function decideItems(
 
   const askAt: number[] = [];
   const queries: OwnQuery[] = [];
+  /** 所持は判定できないが、棚のフォルダ名だけは聞いておく分 (巻数を読めなかったもの) */
+  const folderOnly = new Set<number>();
+  const queryOf = (i: number): OwnQuery => {
+    const meta = inputs[i].meta ?? {};
+    return {
+      title: meta.title ?? null,
+      author: meta.author ?? null,
+      volume: meta.volume ?? null,
+      rawText: meta.rawText ?? null,
+    };
+  };
   /** 同じ投入の中で、先に出た同じものへ寄せる分。i → 寄せ先の index */
   const twinOf = new Map<number, number>();
 
@@ -100,6 +114,12 @@ export async function decideItems(
     // 黙って捨てるより、もう一度落ちる方が被害が小さい。
     if (parsed.volumeFrom === null || parsed.volumeTo === null || !parsed.seriesKey) {
       decisions[i] = { kind: 'new', parsed, missing: null };
+      // 置き場所は巻数と関係なく決まるので、作品名が読めていれば棚のフォルダだけ聞く
+      if (parsed.seriesKey) {
+        folderOnly.add(askAt.length);
+        askAt.push(i);
+        queries.push(queryOf(i));
+      }
       continue;
     }
 
@@ -118,14 +138,8 @@ export async function decideItems(
       continue;
     }
 
-    const meta = inputs[i].meta ?? {};
     askAt.push(i);
-    queries.push({
-      title: meta.title ?? null,
-      author: meta.author ?? null,
-      volume: meta.volume ?? null,
-      rawText: meta.rawText ?? null,
-    });
+    queries.push(queryOf(i));
   }
 
   const answers = await askOwned(pinax, queries);
@@ -134,6 +148,12 @@ export async function decideItems(
     const i = askAt[k];
     const parsed = parsedAll[i];
     const answer = answers[k];
+    const shelfFolder = answer ? pickShelfFolder(answer.series, inputs[i].meta?.author ?? null) : null;
+
+    if (folderOnly.has(k)) {
+      decisions[i] = { kind: 'new', parsed, missing: null, shelfFolder };
+      continue;
+    }
 
     // 読み方が食い違ったら残す。片方だけ直すと、向こうが「持っている」と言った巻を
     // こちらが「持っていない」と言い、静かに二重取得が始まる (volume.ts は移植元が同じ)
@@ -146,7 +166,7 @@ export async function decideItems(
 
     decisions[i] = answer?.owned
       ? { kind: 'skip', parsed, reason: answer.reason || `所持済み (${rangeLabel(parsed.volumeFrom!, parsed.volumeTo!)})` }
-      : { kind: 'new', parsed, missing: answer?.missing ?? null };
+      : { kind: 'new', parsed, missing: answer?.missing ?? null, shelfFolder };
   }
 
   // 寄せた分を、寄せ先の決定に合わせて畳む。寄せ先が落ちないと決まったなら
@@ -164,6 +184,29 @@ export async function decideItems(
 
   return decisions as ItemDecision[];
 }
+
+/**
+ * 棚の答えから、この投入を入れるフォルダを 1 つ選ぶ。決めきれなければ null
+ * (その時は作者・作品名から組み立てる = 今まで通り)。
+ *
+ * 同じ seriesKey の作品が複数並ぶことがある (`[BETEMIUS] 同人誌` と `[河内和泉] 同人誌`)。
+ * 著者が分かっていればフォルダ名の `[著者]` で絞り、それでも 1 つにならなければ選ばない —
+ * 別の作者のフォルダへ入れるくらいなら、新しいフォルダを掘る方が直しやすい。
+ */
+export function pickShelfFolder(
+  series: { folder: string }[] | null | undefined,
+  author: string | null
+): string | null {
+  const folders = [...new Set((series ?? []).map((s) => String(s.folder ?? '').trim()).filter(Boolean))];
+  if (folders.length === 1) return folders[0];
+  const want = loose(author);
+  if (folders.length === 0 || !want) return null;
+  const byAuthor = folders.filter((f) => loose(f.match(/^\s*[[［]([^\]］]*)[\]］]/)?.[1]) === want);
+  return byAuthor.length === 1 ? byAuthor[0] : null;
+}
+
+const loose = (s: string | null | undefined): string =>
+  String(s ?? '').normalize('NFKC').replace(/\s+/g, '').toLowerCase();
 
 /**
  * 同じ投入の中で、先に出た同じものを探す。無ければ null。
@@ -213,8 +256,15 @@ function decideFromJobs(db: Db, userId: number, parsed: ParsedItem): ItemDecisio
     }
   }
 
-  // 2. 落としている最中のジョブがあるなら、そこへミラーとして合流させる
-  const pending = jobs.find((j) => j.status !== 'done');
+  // 2. 落としている最中のジョブが**同じ範囲**なら、そこへミラーとして合流させる。
+  //
+  // 重なりだけで合流させてはいけない。合流した URL はそのジョブのミラー (= 同じファイルの
+  // 別の置き場) になるので、1-3巻のジョブへ 3-5巻を寄せると 4,5 巻は落ちてこず、
+  // 本命が転んだ時には 3-5巻の中身に「第01-03巻」の名前が付く (findTwinInBatch と同じ理由)。
+  // 範囲の違うものは棚に聞いて、足りなければ別のジョブとして落とす
+  const pending = jobs.find(
+    (j) => j.status !== 'done' && j.volumeFrom === from && j.volumeTo === to
+  );
   if (pending) return { kind: 'merge', parsed, jobId: pending.id };
 
   return null;

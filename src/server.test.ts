@@ -301,7 +301,10 @@ test('作品名が無ければ今までどおりの urls 投入のまま', async
  * 棚の代わり。読み方を本物と揃えるために parseItem を通す
  * (pinax の seriesKeyOf はここからの移植で、同じ文字列から同じキーが出るのが前提)。
  */
-async function fakeShelf(shelf: Record<string, { from: number; to: number }[]>) {
+async function fakeShelf(
+  shelf: Record<string, { from: number; to: number }[]>,
+  folders: Record<string, string[]> = {},
+) {
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
@@ -310,12 +313,13 @@ async function fakeShelf(shelf: Record<string, { from: number; to: number }[]>) 
       const answers = items.map((q) => {
         const parsed = parseItem({ title: q?.title ?? null, volume: q?.volume ?? null, rawText: q?.rawText ?? null });
         const have = shelf[parsed.seriesKey] ?? [];
+        const series = (folders[parsed.seriesKey] ?? []).map((folder, id) => ({ id, label: folder, folder, completed: false }));
         if (parsed.volumeFrom === null || parsed.volumeTo === null || have.length === 0) {
-          return { parsed, owned: false, missing: null, series: [], reason: '蔵書にこの作品がありません' };
+          return { parsed, owned: false, missing: null, series, reason: '蔵書にこの作品がありません' };
         }
         const missing = missingVolumes({ from: parsed.volumeFrom, to: parsed.volumeTo }, have);
         return {
-          parsed, owned: missing.length === 0, missing, series: [],
+          parsed, owned: missing.length === 0, missing, series,
           reason: missing.length === 0 ? '所持済み (棚にあります)' : `未所持: ${missing.join(',')}`,
         };
       });
@@ -343,6 +347,30 @@ test('棚が持っている巻は投入されない', async () => {
   assert.equal(body.created.length, 0);
   assert.equal(body.skipped.length, 1);
   assert.match(body.skipped[0].reason, /所持済み/);
+  await app.close();
+  await shelf.close();
+});
+
+/**
+ * 棚に既にあるフォルダの綴りをジョブに焼き、完了後の置き場所はそれに従う。
+ * 投入メタの作者 (`柳野かなた`) だけで組み立てると、棚の `[奥橋睦×柳野かなた×輪くすさが]` と割れる。
+ */
+test('棚に作品があれば、完了後の置き場所は棚の既存フォルダになる', async () => {
+  const key = seriesKeyOf('最果てのパラディン');
+  const folder = '[奥橋睦×柳野かなた×輪くすさが] 最果てのパラディン';
+  const shelf = await fakeShelf({ [key]: [{ from: 1, to: 2 }] }, { [key]: [folder] });
+  const { app, db, queue, user } = await harness(shelf.cfg);
+
+  const res = await app.inject({
+    method: 'POST', url: '/api/jobs',
+    headers: { authorization: `Bearer ${TOKEN}` },
+    payload: { userId: user.id, items: [item('最果てのパラディン', ['https://a.example/dl.rar'], { author: '柳野かなた', volume: '3' })] },
+  });
+  const [created] = res.json().created;
+  const job = db.getJob(created.id)!;
+  assert.equal((job.meta.item as { shelfFolder?: string }).shelfFolder, folder);
+  const shown = queue.present({ ...job, filename: 'dl.rar' });
+  assert.equal(shown.plannedName, `${folder} 第03巻.rar`);
   await app.close();
   await shelf.close();
 });

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { Db } from './db.js';
-import { decideItems, missingVolumes, type ItemInput } from './library.js';
+import { decideItems, missingVolumes, pickShelfFolder, type ItemInput } from './library.js';
 import type { PinaxConfig } from './pinax.js';
 import type { Job } from './types.js';
 import { parseItem, seriesKeyOf } from './volume.js';
@@ -30,7 +30,7 @@ const KEY = seriesKeyOf('作品名');
  */
 async function fakeShelf(
   shelf: Record<string, { from: number; to: number }[]>,
-  opts: { broken?: boolean } = {}
+  opts: { broken?: boolean; folders?: Record<string, string[]> } = {}
 ): Promise<{ cfg: PinaxConfig; calls: number[]; close: () => Promise<void> }> {
   const calls: number[] = [];
   const server = http.createServer((req, res) => {
@@ -46,15 +46,18 @@ async function fakeShelf(
       const answers = items.map((q) => {
         const parsed = parseItem({ title: q?.title ?? null, volume: q?.volume ?? null, rawText: q?.rawText ?? null });
         const have = shelf[parsed.seriesKey] ?? [];
+        const series = (opts.folders?.[parsed.seriesKey] ?? []).map((folder, id) => ({
+          id, label: folder, folder, completed: false,
+        }));
         if (parsed.volumeFrom === null || parsed.volumeTo === null || have.length === 0) {
-          return { parsed, owned: false, missing: null, series: [], reason: '蔵書にこの作品がありません' };
+          return { parsed, owned: false, missing: null, series, reason: '蔵書にこの作品がありません' };
         }
         const missing = missingVolumes({ from: parsed.volumeFrom, to: parsed.volumeTo }, have);
         return {
           parsed,
           owned: missing.length === 0,
           missing,
-          series: [],
+          series,
           reason: missing.length === 0 ? '所持済み (棚にあります)' : `未所持: ${missing.join(',')}`,
         };
       });
@@ -162,13 +165,40 @@ test('棚が未設定なら聞かずに落とす', async () => {
   assert.equal(d.kind, 'new');
 });
 
-test('巻数を読めないものは棚に聞かずに落とす', async () => {
-  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] });
-  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [item({ rawText: 'なんとか.rar' })]);
+/**
+ * 重なりは判定できないので必ず落とす。ただし置き場所 (棚の既存フォルダ) は巻数と関係なく
+ * 決まるので、作品名が読めていればそれだけは聞く。
+ */
+test('巻数を読めないものは、棚が持っていても落とす (フォルダだけ聞く)', async () => {
+  const shelf = await fakeShelf({ [KEY]: [{ from: 1, to: 6 }] }, { folders: { [KEY]: ['[著者] 作品名'] } });
+  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [item({ title: '作品名', rawText: 'なんとか.rar' })]);
   assert.equal(d.kind, 'new');
   assert.equal(d.kind === 'new' ? d.missing : 'x', null);
-  assert.deepEqual(shelf.calls, [], '重なりを判定できないものを棚に聞いても仕方がない');
+  assert.equal(d.kind === 'new' ? d.shelfFolder : 'x', '[著者] 作品名');
   await shelf.close();
+});
+
+// ---- 棚のフォルダ (置き場所) -----------------------------------------------
+
+test('棚に作品があれば、そのフォルダ名を置き場所として持ち帰る', async () => {
+  const key = seriesKeyOf('魔導具師ダリヤはうつむかない ～Dahliya Wilts No More～');
+  const folder = '[甘岸久弥] 魔導具師ダリヤはうつむかない ～Dahliya Wilts No More～';
+  const shelf = await fakeShelf({ [key]: [{ from: 1, to: 2 }] }, { folders: { [key]: [folder] } });
+  const [d] = await decideItems(tmpDb(), shelf.cfg, USER, [
+    item({ title: '魔導具師ダリヤはうつむかない ~Dahliya Wilts No More~', volume: '3' }),
+  ]);
+  assert.equal(d.kind, 'new');
+  assert.equal(d.kind === 'new' ? d.shelfFolder : null, folder);
+  await shelf.close();
+});
+
+test('同じキーの作品が複数あれば著者で絞り、絞れなければ選ばない', () => {
+  const series = [{ folder: '[BETEMIUS] 同人誌' }, { folder: '[河内和泉] 同人誌' }];
+  assert.equal(pickShelfFolder(series, '河内和泉'), '[河内和泉] 同人誌');
+  assert.equal(pickShelfFolder(series, null), null);
+  assert.equal(pickShelfFolder(series, '別の人'), null);
+  assert.equal(pickShelfFolder([{ folder: '[著者] 作品名' }], '別の人'), '[著者] 作品名', '1 つしか無ければそれ');
+  assert.equal(pickShelfFolder([], '著者'), null);
 });
 
 // ---- 棚を見ても分からないこと (落とし中・落とした直後) --------------------
@@ -181,6 +211,40 @@ test('落としている最中のジョブがあれば合流させる (別サイ
   assert.equal(d.kind, 'merge');
   assert.equal(d.kind === 'merge' ? d.jobId : null, job.id);
   assert.deepEqual(shelf.calls, [], '手元で決まるものを棚に聞きに行かない');
+  await shelf.close();
+});
+
+/**
+ * 合流した URL はジョブのミラー (同じファイルの別の置き場) になる。範囲が違うものを寄せると、
+ * 足りない巻が落ちてこないうえ、本命が転んだ時に別の範囲の中身へ今のジョブの名前が付く。
+ */
+test('落としている最中のジョブと範囲が違えば合流させない (1-3巻 に 3-5巻 は寄せない)', async () => {
+  const db = tmpDb();
+  putJob(db, { status: 'downloading', volumeFrom: 1, volumeTo: 3 });
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(db, shelf.cfg, USER, [item({ title: '作品名 第3-5巻' })]);
+  assert.equal(d.kind, 'new');
+  assert.deepEqual(shelf.calls, [1], '範囲が違うものは棚に聞く');
+  await shelf.close();
+});
+
+test('落としている最中の合本に含まれる単巻も、ミラーとしては寄せない', async () => {
+  const db = tmpDb();
+  putJob(db, { status: 'queued', volumeFrom: 1, volumeTo: 6 });
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(db, shelf.cfg, USER, [item({ title: '作品名 第3巻' })]);
+  assert.equal(d.kind, 'new');
+  await shelf.close();
+});
+
+test('範囲違いのジョブと同じ範囲のジョブが並んでいれば、同じ範囲の方へ寄せる', async () => {
+  const db = tmpDb();
+  putJob(db, { status: 'downloading', volumeFrom: 1, volumeTo: 3 });
+  const same = putJob(db, { status: 'queued', volumeFrom: 3, volumeTo: 5 });
+  const shelf = await fakeShelf({});
+  const [d] = await decideItems(db, shelf.cfg, USER, [item({ title: '作品名 第3-5巻' })]);
+  assert.equal(d.kind, 'merge');
+  assert.equal(d.kind === 'merge' ? d.jobId : null, same.id);
   await shelf.close();
 });
 
@@ -240,11 +304,11 @@ test('棚への往復は投入の件数によらず 1 回', async () => {
     item({ title: '作品名 第3巻' }),   // 棚が持っている
     item({ title: '作品名 第7巻' }),   // 棚に無い
     item({ title: '作品名 第9巻' }),   // 落とし中 (棚に聞かない)
-    item({ rawText: '読めない.rar' }), // 巻数不明 (棚に聞かない)
+    item({ rawText: '読めない.rar' }), // 巻数不明 (所持は判定しないが、置き場所のフォルダは聞く)
   ]);
 
   assert.deepEqual(decisions.map((d) => d.kind), ['skip', 'new', 'merge', 'new']);
-  assert.deepEqual(shelf.calls, [2], '手元で決まらなかった 2 件だけをまとめて聞く');
+  assert.deepEqual(shelf.calls, [3], '手元で決まらなかった 3 件だけをまとめて 1 回で聞く');
   await shelf.close();
 });
 

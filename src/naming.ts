@@ -125,12 +125,21 @@ export function parseFilename(name: string): ParsedName {
   };
 }
 
-/** ファイル名として安全な 1 セグメントにする。中身が全部消えたら null */
+/**
+ * ファイル名として安全な 1 セグメントにする。中身が全部消えたら null
+ *
+ * **NFKC をかけないこと。** かけると `～Dahliya～` が `~Dahliya~` に、`ヒナまつり！` が
+ * `ヒナまつり!` に畳まれ、棚にある `[著者] 作品名` フォルダと 1 文字ずれた別フォルダを
+ * 掘ってしまう。DryEyes は棚の実フォルダ名から綴りを借りてきている
+ * (DryEyes の services/pinax.ts `shelfSpelling`) ので、ここで崩すとその手間が全部無駄になる。
+ * 同一性の判定は seriesKeyOf が NFKC してから見るので、ここで揃える必要は無い。
+ * 触るのは Windows が受け付けない文字と、連なった半角空白だけ (全角空白は作品名の一部として残す)。
+ */
 export function sanitizeSegment(raw: string, max = SEGMENT_MAX): string | null {
-  let s = String(raw ?? '').normalize('NFKC');
+  let s = String(raw ?? '');
   s = s.replace(/[\u0000-\u001f\u007f]/g, '');
   s = s.replace(/[\\/:*?"<>|]/g, (c) => FORBIDDEN[c] ?? '');
-  s = s.replace(/\s+/g, ' ').trim();
+  s = s.replace(/ {2,}/g, ' ').trim();
   if (s.length > max) s = s.slice(0, max).trim();
   // 末尾のピリオドと空白は Windows が黙って落とす。付けたまま作ると、
   // 作ったつもりの名前と実際の名前がずれて探せなくなる
@@ -159,6 +168,28 @@ export interface NameInput {
   volumeFrom?: number | null;
   volumeTo?: number | null;
   unit?: VolumeUnit;
+  /**
+   * 棚 (pinax) に既にある、この作品のフォルダ名。投入の時に所持と一緒に聞いてある。
+   *
+   * **あればこれを正とする。** 作者・作品名から組み立て直すと、棚の綴りと 1 文字違うだけで
+   * (`～` と `~`、区切りの `×` と `x`、副題の有無) 同じ作品が 2 つのフォルダに割れる。
+   * pinax の受け入れトレイ (inbox.ts) が既存フォルダを優先するのと同じ考え方。
+   */
+  shelfFolder?: string | null;
+}
+
+/** 完結マーク。棚のフォルダ名には付くが、ファイル名の作品名としては書かない */
+const COMPLETION_MARK = /\s*[(（]\s*完\s*[)）]\s*$/;
+
+/**
+ * 棚のフォルダ名を、そのまま使ってよい形か確かめる。駄目なら null。
+ * 外 (pinax) から来た値なので、道の区切りや `..` を持ち込ませない
+ */
+function usableShelfFolder(raw: string | null | undefined): string | null {
+  const s = String(raw ?? '').trim();
+  if (!s || s === '.' || s === '..') return null;
+  // 手を入れないと Windows に置けない名前は、棚にある本物のフォルダ名ではない
+  return sanitizeSegment(s) === s ? s : null;
 }
 
 export interface NamePlan {
@@ -182,6 +213,9 @@ export interface NamePlan {
  */
 export function planName(filename: string, input: NameInput = {}, opts: { folder?: boolean } = {}): NamePlan {
   const parsed = parseFilename(filename);
+  const shelf = usableShelfFolder(input.shelfFolder);
+  if (shelf) return planOnShelf(parsed, filename, shelf, input, opts);
+
   const author = (input.author ?? '').trim() || parsed.author;
   const rawTitle = (input.title ?? '').trim() || parsed.title;
   const volFrom = input.volumeFrom ?? parsed.volumeFrom;
@@ -213,6 +247,27 @@ export function planName(filename: string, input: NameInput = {}, opts: { folder
 }
 
 /**
+ * 棚に既にあるフォルダへ入れる。ファイル名の頭もそのフォルダ名に揃える —
+ * 棚のファイルは `[著者] 作品名/[著者] 作品名 第nn巻` の形で並んでいるので、
+ * 組み立て直した綴りを混ぜると同じフォルダの中で名前がばらける。
+ */
+function planOnShelf(
+  parsed: ParsedName,
+  filename: string,
+  shelf: string,
+  input: NameInput,
+  opts: { folder?: boolean }
+): NamePlan {
+  const folder = opts.folder === false ? null : shelf;
+  const volFrom = input.volumeFrom ?? parsed.volumeFrom;
+  const volTo = input.volumeTo ?? parsed.volumeTo;
+  const unit = input.unit ?? parsed.unit;
+  const label = shelf.replace(COMPLETION_MARK, '').trim() || shelf;
+  if (volFrom === null || volTo === null) return { folder, file: filename, keepName: true };
+  return { folder, file: `${label} ${formatVolume(volFrom, volTo, unit)}${parsed.part}${parsed.ext}`, keepName: false };
+}
+
+/**
  * パスが長すぎるなら作品名を削って収める。
  *
  * NAS (UNC) の下に `[著者] 作品名` を 2 回重ねると、日本語の長い作品名で
@@ -222,6 +277,12 @@ export function planName(filename: string, input: NameInput = {}, opts: { folder
 export function fitPath(baseDir: string, plan: NamePlan, input: NameInput = {}): NamePlan {
   const lengthOf = (p: NamePlan): number => path.join(baseDir, p.folder ?? '', p.file).length;
   if (lengthOf(plan) <= PATH_MAX) return plan;
+  // 棚のフォルダ名は削れない (削ると別フォルダになる)。収まらないなら組み立てる側へ戻して詰める
+  if (usableShelfFolder(input.shelfFolder)) {
+    input = { ...input, shelfFolder: null };
+    plan = planName(plan.file, input, { folder: plan.folder !== null });
+    if (lengthOf(plan) <= PATH_MAX) return plan;
+  }
   // 元の名前を保つと決めたものは削らない。長さより「読み戻せること」を採る
   if (plan.keepName) {
     return plan.folder !== null && lengthOf({ ...plan, folder: null }) <= PATH_MAX
