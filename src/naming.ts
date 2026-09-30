@@ -111,12 +111,15 @@ function takeAuthor(s: string): { author: string | null; rest: string } {
 export function parseFilename(name: string): ParsedName {
   const { stem, part, ext } = splitFilename(name);
   const { author, rest } = takeAuthor(stem);
-  const { normalized, match } = findVolumeIn(rest);
-  const head = (match ? normalized.slice(0, match.start) : normalized).trim();
+  const { normalized, match, toRaw } = findVolumeIn(rest);
+  // 巻数は正規化した文字列で探すが、作品名は元の綴りで切る (sanitizeSegment と同じ理由)。
+  // 位置を写せない珍しい並びの時だけ、正規化した方を切る
+  const at = match ? toRaw(match.start) : -1;
+  const head = (match ? (at >= 0 ? rest.slice(0, at) : normalized.slice(0, match.start)) : rest).trim();
   return {
     author,
     // 巻数の手前が空なら、巻数表現しか書かれていない。作品名の代わりに全体を残す
-    title: head || normalized.trim(),
+    title: head || rest.trim(),
     volumeFrom: match?.from ?? null,
     volumeTo: match?.to ?? null,
     unit: match?.unit ?? '巻',

@@ -175,3 +175,13 @@ test('棚のフォルダでもパスに収まらなければ、組み立てる�
   assert.ok(path.join(base, fitted.folder ?? '', fitted.file).length <= 240);
   assert.ok(fitted.file.endsWith('第01巻.rar'), fitted.file);
 });
+
+test('作品名は元の綴りで切り出す (全角の ？ や ～ を半角に崩さない)', () => {
+  const a = parseFilename('[あかりん 細音啓] なぜ僕の世界を誰も覚えていないのか？ 第０１巻.rar');
+  assert.equal(a.title, 'なぜ僕の世界を誰も覚えていないのか？');
+  assert.equal(a.volumeFrom, 1);
+
+  const b = parseFilename('ｶﾞｯﾂ！～外伝～ 第３巻.zip');
+  assert.equal(b.title, 'ｶﾞｯﾂ！～外伝～');
+  assert.equal(b.volumeFrom, 3);
+});

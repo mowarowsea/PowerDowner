@@ -111,8 +111,46 @@ function findVolume(text: string): VolumeMatch | null {
  * 元の文字列に当てると、全角英数が半角に畳まれた分だけずれる。
  * リネーム側が「どこからが巻数か」を知ってタイトルを切り出すために要る。
  */
-export function findVolumeIn(text: string): { normalized: string; match: VolumeMatch | null } {
-  return { normalized: nfkc(text), match: findVolume(text) };
+export function findVolumeIn(text: string): {
+  normalized: string;
+  match: VolumeMatch | null;
+  toRaw: (i: number) => number;
+} {
+  const { normalized, toRaw } = nfkcWithMap(String(text ?? ''));
+  return { normalized, match: findVolume(text), toRaw };
+}
+
+// 直前の文字とくっついて 1 文字に畳まれるもの (結合文字と半角の濁点・半濁点)。
+// ｶﾞ は 2 文字で ガ 1 文字になるので、ひとかたまりとして扱わないと位置がずれる
+const JOINS_PREVIOUS = /[\p{M}\uFF9E\uFF9F]/u;
+
+/**
+ * NFKC 正規化と、正規化後の位置 → 元の文字列の位置の対応を返す (pinax の volume.ts と同じ)。
+ *
+ * **NFKC は突き合わせのためのもので、名前として残すのは元の綴り。**
+ * 巻数は正規化した文字列で探すが、作品名をそこから切ると `？` が `?` に崩れ、
+ * 棚のフォルダと 1 文字ずれた別フォルダを掘る (sanitizeSegment の注意書きと同じ理由)。
+ *
+ * かたまりごとに正規化して繋ぐ。繋いだものが丸ごとの正規化と一致しない時は
+ * 位置を写せないので -1 を返す — 呼び出し側は正規化後の文字列を切る (以前と同じ振る舞い)。
+ */
+export function nfkcWithMap(raw: string): { normalized: string; toRaw: (i: number) => number } {
+  const whole = nfkc(raw);
+  const starts: number[] = [];
+  let built = '';
+  let i = 0;
+  while (i < raw.length) {
+    let j = i + (raw.codePointAt(i)! > 0xffff ? 2 : 1);
+    while (j < raw.length && JOINS_PREVIOUS.test(String.fromCodePoint(raw.codePointAt(j)!))) {
+      j += raw.codePointAt(j)! > 0xffff ? 2 : 1;
+    }
+    const piece = raw.slice(i, j).normalize('NFKC');
+    for (let k = 0; k < piece.length; k++) starts.push(i);
+    built += piece;
+    i = j;
+  }
+  if (built !== whole) return { normalized: whole, toRaw: () => -1 };
+  return { normalized: whole, toRaw: (n) => (n >= starts.length ? raw.length : starts[n]) };
 }
 
 /**
