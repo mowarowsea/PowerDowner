@@ -35,6 +35,49 @@ interface Aria2Status {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** aria2 の終了コード (https://aria2.github.io/manual/en/html/aria2c.html#exit-status) を人向けの言葉に */
+const ARIA2_ERRORS: Record<string, string> = {
+  '1': '原因不明のエラーで止まりました',
+  '2': 'サーバーから応答がなくタイムアウトしました',
+  '3': 'サーバーにファイルが見つかりません (削除済みか、リンクの期限切れ)',
+  '4': 'どのリンクからもファイルが見つかりませんでした',
+  '5': '速度が遅すぎるので打ち切りました',
+  '6': '通信エラーで切れました',
+  '7': '完了前に aria2 が終了しました',
+  '8': 'サーバーが途中からの再開に対応していません',
+  '9': 'ディスクの空き容量が足りません',
+  '10': '落としかけのファイルと中身が合いません',
+  '11': '同じファイルを既に落としています',
+  '12': '同じトレントを既に落としています',
+  '13': '同じ名前のファイルが既にあります',
+  '14': 'ファイル名の変更に失敗しました',
+  '15': '既存のファイルを開けませんでした',
+  '16': 'ファイルを作れませんでした (権限やパスを確認してください)',
+  '17': 'ファイルの読み書きでエラーが起きました',
+  '18': '保存先フォルダを作れませんでした',
+  '19': 'サーバーの名前解決に失敗しました (ネット接続を確認してください)',
+  '20': 'Metalink を読めませんでした',
+  '21': 'FTP のコマンドが失敗しました',
+  '22': 'サーバーから想定外の応答が返りました',
+  '23': 'リダイレクトが多すぎます',
+  '24': 'サーバーの認証に失敗しました (ログインが必要かもしれません)',
+  '25': 'トレントファイルを読めませんでした',
+  '26': 'トレントファイルが壊れています',
+  '27': 'マグネットリンクが正しくありません',
+  '28': 'aria2 に渡したオプションが正しくありません',
+  '29': 'サーバーが混雑中かメンテナンス中です',
+  '30': 'aria2 への指示を読めませんでした',
+  '32': 'チェックサムが一致しません (ファイルが壊れています)',
+};
+
+/**
+ * 失敗理由の表示文言。末尾の `(aria2 code N)` は queue.ts が引き直し判定に使うので必ず残す
+ */
+export function aria2ErrorText(code: string | undefined, raw: string | undefined): string {
+  const text = (code && ARIA2_ERRORS[code]) ?? raw ?? '原因不明のエラーで止まりました';
+  return `${text} (aria2 code ${code ?? '?'})`;
+}
+
 /**
  * aria2c を子プロセスとして起動し、WebSocket JSON-RPC で操作する。
  * セッションファイルを使うので、aria2 と本アプリのどちらが再起動しても
@@ -281,7 +324,8 @@ export class Aria2Engine {
     let msg = 'aria2 error';
     try {
       const st = await this.call<Aria2Status>('aria2.tellStatus', [gid, ['errorCode', 'errorMessage']]);
-      msg = `${st.errorMessage ?? 'unknown'} (aria2 code ${st.errorCode ?? '?'})`;
+      msg = aria2ErrorText(st.errorCode, st.errorMessage);
+      if (st.errorMessage) log(`[aria2] ${st.errorMessage} (code ${st.errorCode ?? '?'})`);
     } catch { /* ignore */ }
     this.cb.onFailed(jobId, msg);
     this.call('aria2.removeDownloadResult', [gid]).catch(() => { /* ignore */ });
