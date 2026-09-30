@@ -133,9 +133,9 @@ export function parseFilename(name: string): ParsedName {
  *
  * **NFKC をかけないこと。** かけると `～Dahliya～` が `~Dahliya~` に、`ヒナまつり！` が
  * `ヒナまつり!` に畳まれ、棚にある `[著者] 作品名` フォルダと 1 文字ずれた別フォルダを
- * 掘ってしまう。DryEyes は棚の実フォルダ名から綴りを借りてきている
- * (DryEyes の services/pinax.ts `shelfSpelling`) ので、ここで崩すとその手間が全部無駄になる。
- * 同一性の判定は seriesKeyOf が NFKC してから見るので、ここで揃える必要は無い。
+ * 掘ってしまう。作品名は pinax の棚の綴りのまま DryEyes 経由で届くので、ここで崩さない。
+ * 正規化は突き合わせのキーにだけ使う — 同一性の判定は seriesKeyOf が NFKC してから見るので、
+ * ここで揃える必要は無い。
  * 触るのは Windows が受け付けない文字と、連なった半角空白だけ (全角空白は作品名の一部として残す)。
  */
 export function sanitizeSegment(raw: string, max = SEGMENT_MAX): string | null {

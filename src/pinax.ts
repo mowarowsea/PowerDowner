@@ -109,37 +109,8 @@ interface SeriesRow {
   id: number;
   title: string;
   author: string | null;
-  /** 棚の実フォルダ名 `[作者] 作品名`。title / author はこれを表示用に整えたもの */
-  folder?: string | null;
   fileCount?: number;
   shelf?: { label?: string | null } | null;
-}
-
-/**
- * 作者・作品名を、棚の実フォルダ名の綴りで取り出す (DryEyes の services/pinax.ts と同じ)。
- *
- * pinax の title / author は表示用に全角記号を半角へ寄せてある
- * (`～Dahliya～` が `~Dahliya~` になる)。これをそのまま使うとリネーム先のフォルダ名が
- * 既存の棚と 1 文字ずれて、同じ作品が 2 箇所に割れる。だから本物の綴りはフォルダ名から取る。
- *
- * 末尾の `(完)` は棚で完結の印に付けているもので、作品名ではないので外す。
- * 取り出したものが title / author と (表記揺れを除いて) 一致しないときは
- * フォルダ名の形が想定外ということなので、pinax の値をそのまま使う。
- */
-export function shelfSpelling(row: Pick<SeriesRow, 'title' | 'author' | 'folder'>): {
-  title: string;
-  author: string | null;
-} {
-  const fallback = { title: row.title, author: row.author ?? null };
-  const m = (row.folder ?? '').match(/^\[([^\]]+)\]\s*(.+)$/);
-  if (!m) return fallback;
-
-  const author = m[1].trim();
-  const title = m[2].replace(/\s*[(（]完[)）]\s*$/, '').trim();
-  const loose = (s: string | null | undefined) => (s ?? '').normalize('NFKC').trim();
-  if (loose(title) !== loose(row.title) || loose(author) !== loose(row.author)) return fallback;
-
-  return { title, author };
 }
 
 /**
@@ -169,7 +140,9 @@ export async function searchSeries(cfg: PinaxConfig, q: string, limit = 8): Prom
   const json = (await res.json()) as { items?: SeriesRow[] };
   return (json.items ?? []).map((row) => ({
     id: row.id,
-    ...shelfSpelling(row),
+    // pinax の title / author は棚の綴りそのまま (正規化は向こうの突き合わせにだけ使う)
+    title: row.title,
+    author: row.author ?? null,
     files: row.fileCount ?? 0,
     shelf: row.shelf?.label ?? null,
   }));
