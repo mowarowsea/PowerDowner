@@ -306,16 +306,28 @@
       renderJob(el, job);
     }
     for (const el of [...root.children]) {
-      if (keep.has(el.dataset.id)) continue;
+      if (el === doneHead || keep.has(el.dataset.id)) continue;
       state.openMirrors.delete(el.dataset.id);
       el.remove();
     }
-    // 並び順を合わせる
-    list.forEach((job, i) => {
-      const el = root.querySelector(`[data-id="${job.id}"]`);
+    // 並び順を合わせる。完了を開いている時は、長い完了一覧の下まで行かなくても
+    // 畳めるよう、完了の頭にも見出しを挟む
+    const order = list.map((job) => root.querySelector(`[data-id="${job.id}"]`));
+    if (state.showDone && done.length) {
+      order.splice(active.length, 0, doneHead);
+      doneHead.querySelector('.num').textContent = String(done.length);
+    } else doneHead.remove();
+    order.forEach((el, i) => {
       if (root.children[i] !== el) root.insertBefore(el, root.children[i] || null);
     });
   }
+
+  // 完了一覧の頭に出す見出し。押すと下の「隠す」と同じく完了を畳む
+  const doneHead = document.createElement('div');
+  doneHead.className = 'donefoot donehead';
+  doneHead.innerHTML = `<span>完了 <span class="num"></span> 件</span><span class="spacer"></span>
+    <button type="button" class="quiet sm"><i class="fa-solid fa-chevron-up"></i> 隠す</button>`;
+  doneHead.querySelector('button').onclick = () => toggleDone();
 
   // 進捗更新は秒単位で飛んでくるので、行は一度組み立てて以後は中身だけ差し替える。
   // (毎回 innerHTML を書き直すとファビコンの img が作り直されてちらつく)
@@ -1006,11 +1018,12 @@
     try { localStorage.setItem('pd.showLog', state.showLog ? '1' : '0'); } catch { /* ignore */ }
     renderLog();
   };
-  $('btnToggleDone').onclick = () => {
+  function toggleDone() {
     state.showDone = !state.showDone;
     try { localStorage.setItem('pd.showDone', state.showDone ? '1' : '0'); } catch { /* ignore */ }
     renderJobs();
-  };
+  }
+  $('btnToggleDone').onclick = toggleDone;
   $('btnClearDone').onclick = async () => {
     const done = visibleJobs().filter((j) => j.status === 'done');
     for (const j of done) { try { await api('DELETE', `/api/jobs/${j.id}`); } catch { /* ignore */ } }
