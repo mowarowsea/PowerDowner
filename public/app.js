@@ -325,9 +325,12 @@
   // 完了一覧の頭に出す見出し。押すと下の「隠す」と同じく完了を畳む
   const doneHead = document.createElement('div');
   doneHead.className = 'donefoot donehead';
-  doneHead.innerHTML = `<span>完了 <span class="num"></span> 件</span><span class="spacer"></span>
-    <button type="button" class="quiet sm"><i class="fa-solid fa-chevron-up"></i> 隠す</button>`;
-  doneHead.querySelector('button').onclick = () => toggleDone();
+  doneHead.innerHTML = `<span>完了 <span class="num"></span> 件</span>
+    <button type="button" class="sm clear" title="完了したジョブを一覧から消す (ファイルは残ります)"><i class="fa-solid fa-broom"></i> 一覧から消す</button>
+    <span class="spacer"></span>
+    <button type="button" class="quiet sm fold"><i class="fa-solid fa-chevron-up"></i> 隠す</button>`;
+  doneHead.querySelector('.fold').onclick = () => toggleDone();
+  doneHead.querySelector('.clear').onclick = () => clearDone();
 
   // 進捗更新は秒単位で飛んでくるので、行は一度組み立てて以後は中身だけ差し替える。
   // (毎回 innerHTML を書き直すとファビコンの img が作り直されてちらつく)
@@ -1024,10 +1027,11 @@
     renderJobs();
   }
   $('btnToggleDone').onclick = toggleDone;
-  $('btnClearDone').onclick = async () => {
+  async function clearDone() {
     const done = visibleJobs().filter((j) => j.status === 'done');
     for (const j of done) { try { await api('DELETE', `/api/jobs/${j.id}`); } catch { /* ignore */ } }
-  };
+  }
+  $('btnClearDone').onclick = clearDone;
 
   // ---- boot --------------------------------------------------------------
   state.userId = loadUserPick();
