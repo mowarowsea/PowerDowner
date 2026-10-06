@@ -45,6 +45,8 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.55 var(--sans); }
+/* 完了の開閉などで縦スクロールバーが出入りしても、幅が変わって画面がずれないよう溝を確保しておく */
+html { scrollbar-gutter: stable; }
 h1 { font-size: 18px; margin: 0; }
 h2 { font-size: 15px; margin: 0 0 8px; }
 button { font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 6px 12px; cursor: pointer; }
