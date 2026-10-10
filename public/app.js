@@ -814,8 +814,32 @@
   $('btnCivitAll').onclick = async () => {
     for (const card of [...civit.cards]) if (card.data) await submitCivitCard(card);
   };
+  /**
+   * ページを範囲選択してコピーしたものは、クリップボードに HTML でも入っている。
+   * 素直に貼ると表示名 (<a> の中身) しか来ないので、リンク先 (href) を 1 行ずつ取り出す。
+   */
+  function hrefsFromHtml(html) {
+    if (!html || !/<a[\s>]/i.test(html)) return [];
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const out = [];
+    for (const a of doc.querySelectorAll('a[href]')) {
+      const href = a.getAttribute('href').trim();
+      if (/^https?:\/\//i.test(href) && !out.includes(href)) out.push(href);
+    }
+    return out;
+  }
+
   // 貼った瞬間にカードにする。「追加」を押してから調べ始めると、その数秒を余計に待つ
-  $('urls').addEventListener('paste', () => {
+  $('urls').addEventListener('paste', (e) => {
+    const hrefs = hrefsFromHtml(e.clipboardData && e.clipboardData.getData('text/html'));
+    if (hrefs.length) {
+      e.preventDefault();
+      const ta = $('urls');
+      const before = ta.value.slice(0, ta.selectionStart);
+      const lead = before && !before.endsWith('\n') ? '\n' : '';
+      ta.setRangeText(lead + hrefs.join('\n') + '\n', ta.selectionStart, ta.selectionEnd, 'end');
+      toast(`リンク ${hrefs.length} 件を取り出しました`);
+    }
     setTimeout(() => {
       const ta = $('urls');
       if (/civitai\.(com|red)\//i.test(ta.value)) ta.value = takeCivitai(ta.value);
