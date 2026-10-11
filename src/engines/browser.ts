@@ -606,10 +606,9 @@ export class BrowserEngine {
   }
 
   private async runDriver(cur: Current): Promise<void> {
+    // ブラウザ自身に保存させるモード (meta.browserDirect) でも操作は自動で進める。
+    // 保存は download イベント側 (onDownload → saveViaBrowser) が受け持つ
     const { job, page } = cur;
-    if (job.meta.browserDirect === true) {
-      // ブラウザ自身に保存させるモードでも、操作は自動で進める (download イベントで saveAs する)
-    }
     const ctx: DriverContext = {
       page,
       url: job.url,
@@ -670,6 +669,15 @@ export class BrowserEngine {
       case 'download-started':
         return; // onDownload が処理済み
       case 'direct':
+        if (job.meta.browserDirect === true) {
+          // aria2 への引き継ぎは一度拒否されている。直リンクをこのタブで開いて
+          // download イベントを起こし、ブラウザ自身に保存させる
+          await page.goto(result.url, { timeout: 30_000 }).catch(() => { /* ダウンロードになると goto は失敗扱いで返る */ });
+          if (!(await this.waitDownload(cur, 30_000)) && !cur.handled) {
+            this.fail(job.id, '直リンクを開きましたがダウンロードが始まりませんでした');
+          }
+          return;
+        }
         await this.handoffUrl(cur, page, result.url, result.filename);
         return;
       case 'wait': {

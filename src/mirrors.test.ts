@@ -133,7 +133,7 @@ test('ミラーへ移る時は経路の記憶と進捗を落とす', async () =>
   assert.equal(job.bytesDone, 0);
 });
 
-test('ブラウザ引き継ぎの再試行余地があるうちはミラーへ移らない', async () => {
+test('直リンクの引き継ぎが拒否されたら、ミラーへ移らずブラウザ自身で落とし直す', async () => {
   const { db, queue, user } = makeQueue(PRIORITY);
   const r = await queue.addItems({
     userId: user.id,
@@ -144,8 +144,10 @@ test('ブラウザ引き継ぎの再試行余地があるうちはミラーへ�
 
   queue.onFailed(id, '403 Forbidden');
   const job = db.getJob(id)!;
-  assert.equal(job.status, 'failed');
+  // 人の再試行を待たずに回り始める (router は解決しないので resolving で止まる)
+  assert.notEqual(job.status, 'failed');
   assert.equal(job.meta.browserDirect, true);
+  assert.equal(job.meta.route, 'browser');
   // 同じ URL で試す余地を使い切る前にミラーへ移らない
   assert.equal(job.url, 'https://dailyuploads.net/x');
   assert.deepEqual(job.meta.mirrors, ['https://uploady.io/x']);

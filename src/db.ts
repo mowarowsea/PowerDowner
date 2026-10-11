@@ -211,9 +211,7 @@ export class Db {
   deleteUser(id: number): boolean {
     const n = this.db.prepare('SELECT COUNT(*) AS n FROM jobs WHERE user_id = ?').get(id) as { n: number };
     if (n.n > 0) throw new Error('このユーザーにはジョブが残っているため削除できません');
-    // 台帳はジョブを消しても残るが、持ち主がいなくなれば意味を失う。
-    // ここで落とさないと、一度でも落としたユーザーは二度と消せなくなる
-    this.db.prepare('DELETE FROM items WHERE user_id = ?').run(id);
+    // 取得済みの台帳 (items) は起動時に捨てている (migrateItemsToJobs) ので、道連れに消すものは無い
     return this.db.prepare('DELETE FROM users WHERE id = ?').run(id).changes > 0;
   }
 

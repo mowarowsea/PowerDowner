@@ -438,15 +438,21 @@ export class Queue {
     if (!cur) return;
 
     // ブラウザから aria2 へ引き継いだ直リンクが拒否された場合は、同じ URL をブラウザ自身に
-    // 保存させれば通る見込みがある。まだ試していないなら、ミラーへ移る前にそちらを使い切る
+    // 保存させれば通る見込みがある。まだ試していないなら、ミラーへ移る前にそちらを使い切る。
+    // 人の再試行を待たずにそのまま回す — failed で止めると「放っておけば落ちている」が崩れる。
+    // ブラウザ自身でも駄目なら engine が browser になっているので、次はここを通らずミラーへ移る
     if (cur.engine === 'aria2' && cur.meta.via === 'browser' && cur.meta.browserDirect !== true) {
-      const message = `${error} → 直リンクの引き継ぎに失敗しました。再試行するとブラウザ自身でダウンロードします`;
       const job = this.db.patchJob(jobId, {
-        status: 'failed', speed: 0, error: message,
-        meta: { browserDirect: true, humanDetail: '' },
+        status: 'queued', engine: null, externalId: null, error: null, speed: 0,
+        bytesTotal: 0, bytesDone: 0,
+        meta: {
+          browserDirect: true, route: 'browser', via: '',
+          detail: '直リンクの引き継ぎに失敗したので、ブラウザ自身でダウンロードし直します', humanDetail: '',
+        },
       });
-      log(`[queue] 失敗: ${cur.url} -> ${message}`);
+      log(`[queue] 直リンクの引き継ぎに失敗。ブラウザ自身で落とし直します: ${cur.url} (${error})`);
       this.emit(job);
+      this.schedulePump();
       return;
     }
 
@@ -1099,14 +1105,33 @@ export class Queue {
     }
   }
 
-  private async dispatch(job: Job): Promise<void> {
-    this.emit(this.db.patchJob(job.id, { status: 'resolving', error: null }));
+  /**
+   * 解析中 (resolving) のまま残っているか。
+   * 経路の判定やエンジンへの受け渡しは await を挟むので、その間に画面から中止・削除されうる。
+   * 戻ってきた時に確かめないと、中止したはずのジョブを downloading で上書きして落とし始める
+   */
+  private stillResolving(id: string): boolean {
+    return this.db.getJob(id)?.status === 'resolving';
+  }
+
+  private async dispatch(queued: Job): Promise<void> {
+    // 一覧は pump の頭で取ったもの。順番を待つ間に中止・削除されていることがある
+    const fresh = this.db.getJob(queued.id);
+    if (!fresh || fresh.status !== 'queued') return;
+    const job = this.db.patchJob(fresh.id, { status: 'resolving', error: null })!;
+    this.emit(job);
     try {
       const route = await this.router.resolve(job);
+      if (!this.stillResolving(job.id)) return;
       if (route.engine === 'aria2') {
         if (!(await this.aria2.ready())) throw new Error(`aria2 が利用できません: ${this.aria2.detail}`);
         const r = route.resolved!;
         const gid = await this.aria2.add({ ...job, engine: 'aria2' }, r);
+        if (!this.stillResolving(job.id)) {
+          // 渡している間に中止・削除された。aria2 に残すと誰のものでもないファイルが落ちてくる
+          await this.aria2.cancel({ ...job, engine: 'aria2', externalId: gid });
+          return;
+        }
         this.emit(this.db.patchJob(job.id, {
           status: 'downloading', engine: 'aria2', externalId: gid,
           filename: r.filename ?? null, bytesTotal: r.bytesTotal ?? 0,
@@ -1115,6 +1140,10 @@ export class Queue {
         if (!this.jd2.available) throw new Error(`JD2 が利用できません: ${this.jd2.detail}`);
         // ワンクリックホスター経路に入った = アップローダだと分かった。まだ台帳に無ければ起こす
         const ext = await this.jd2.add({ ...job, engine: 'jd2' });
+        if (!this.stillResolving(job.id)) {
+          await this.jd2.cancel({ ...job, engine: 'jd2' });
+          return;
+        }
         this.emit(this.db.patchJob(job.id, {
           status: 'downloading', engine: 'jd2', externalId: ext,
           meta: { hosterKey: this.learnHoster(job) },
@@ -1131,6 +1160,8 @@ export class Queue {
       }
       log(`[queue] 投入 (${route.engine}): ${job.url}`);
     } catch (e) {
+      // 中止・削除されたジョブを failed で上書きしない
+      if (!this.stillResolving(job.id)) return;
       this.onFailed(job.id, (e as Error).message);
     }
   }
