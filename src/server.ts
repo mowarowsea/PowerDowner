@@ -9,7 +9,7 @@ import { Favicons } from './favicon.js';
 import { HttpError, type Queue } from './queue.js';
 import type { Aria2Engine } from './engines/aria2.js';
 import type { Jd2Engine } from './engines/jd2.js';
-import type { BrowserEngine } from './engines/browser.js';
+import type { BrowserEngine, RemoteInput } from './engines/browser.js';
 import { bus, log } from './events.js';
 import type { Job, EngineStatus } from './types.js';
 import { parseItem, seriesKeyOf } from './volume.js';
@@ -292,6 +292,29 @@ export async function buildServer({ cfg, db, queue, aria2, jd2, browser }: Deps)
     const r = await browser.dump(req.params.id, req.query.shot !== '0');
     if (!r) throw new HttpError(400, 'このジョブは今ブラウザで開かれていません');
     return r;
+  });
+
+  // 遠隔操作: ブラウザのタブの画面を返し、タップや文字入力をそのタブへ流す。
+  // 人間判定を母艦 PC の前に座らずにスマホから通すためのもの
+  app.get<{ Params: { id: string }; Querystring: { front?: string } }>('/api/jobs/:id/screen', async (req, reply) => {
+    const r = await browser.screen(req.params.id, req.query.front === '1');
+    if (!r) throw new HttpError(404, 'このジョブは今ブラウザで開かれていません');
+    reply.header('Cache-Control', 'no-store').header('X-Css-Width', r.width).header('X-Css-Height', r.height);
+    return reply.type('image/jpeg').send(r.jpeg);
+  });
+
+  app.post<{ Params: { id: string }; Body: RemoteInput }>('/api/jobs/:id/input', async (req) => {
+    const ev = req.body;
+    const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+    const ok = ev && (
+      (ev.type === 'tap' && num(ev.x) && num(ev.y))
+      || (ev.type === 'text' && typeof ev.text === 'string' && ev.text.length <= 500)
+      || (ev.type === 'key' && ['Enter', 'Backspace', 'Tab', 'Escape'].includes(ev.key))
+      || (ev.type === 'scroll' && num(ev.x) && num(ev.y) && num(ev.dy))
+      || ev.type === 'reload');
+    if (!ok) throw new HttpError(400, '操作の形式が正しくありません');
+    if (!await browser.input(req.params.id, ev)) throw new HttpError(404, 'このジョブは今ブラウザで開かれていません');
+    return { ok: true };
   });
 
   app.delete<{ Params: { id: string } }>('/api/jobs/:id', async (req) => {

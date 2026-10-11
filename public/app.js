@@ -456,10 +456,14 @@
       </li>`).join('');
   }
 
-  const ACT_ICON = { retry: 'fa-rotate-right', resume: 'fa-play', preview: 'fa-image', cancel: 'fa-stop', remove: 'fa-xmark' };
+  const ACT_ICON = { retry: 'fa-rotate-right', resume: 'fa-play', preview: 'fa-image', cancel: 'fa-stop', remove: 'fa-xmark', remote: 'fa-mobile-screen' };
+
+  /** ブラウザのタブを開いているジョブ。遠隔操作の画面を出せる */
+  const remoteable = (job) => job.engine === 'browser' && (job.status === 'downloading' || job.status === 'waiting_human');
 
   function renderActions(root, job) {
     const acts = [];
+    if (remoteable(job)) acts.push(['remote', job.status === 'waiting_human' ? '画面を操作' : '画面', 'ブラウザの画面をここに映して操作する (スマホから人間判定を通せます)']);
     if (job.status === 'failed' || job.status === 'canceled') acts.push(['retry', '再試行', 'このジョブの候補を全部やり直す。失敗の記録を消して、優先度の高いアップローダから試し直します']);
     if (job.status === 'waiting_human' && job.engine === 'jd2') acts.push(['resume', 'JD2 で再開', 'JD2 のスキップを解除して再挑戦させる']);
     const pv = job.meta && job.meta.preview;
@@ -478,7 +482,8 @@
       if (tip) b.title = tip;
       b.onclick = async () => {
         try {
-          if (act === 'retry') await api('POST', `/api/jobs/${job.id}/retry`);
+          if (act === 'remote') openRemote(job.id);
+          else if (act === 'retry') await api('POST', `/api/jobs/${job.id}/retry`);
           else if (act === 'cancel') await api('POST', `/api/jobs/${job.id}/cancel`);
           else if (act === 'resume') await api('POST', `/api/jobs/${job.id}/resume`);
           else if (act === 'preview') await api('POST', `/api/jobs/${job.id}/preview`);
@@ -529,8 +534,13 @@
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data);
-      if (m.type === 'hello') applyState(m.state);
-      else if (m.type === 'job') { state.jobs.set(m.job.id, m.job); renderJobs(); }
+      if (m.type === 'hello') {
+        applyState(m.state);
+        // 通知などから /#remote=<ジョブ ID> で開かれたら、そのまま操作画面を出す
+        const hit = /^#remote=([\w-]+)$/.exec(location.hash);
+        if (hit && remote.id !== hit[1]) openRemote(hit[1]);
+      }
+      else if (m.type === 'job') { state.jobs.set(m.job.id, m.job); renderJobs(); if (m.job.id === remote.id) remoteText(); }
       else if (m.type === 'jobRemoved') { state.jobs.delete(m.id); renderJobs(); }
       else if (m.type === 'engine') { state.engines[m.status.name] = m.status; renderEngines(); }
       else if (m.type === 'captcha') showCaptcha(m.notice);
@@ -561,13 +571,113 @@
       lines.push(`JD2 が CAPTCHA の入力を待っています (${esc(n.hosts.join(', '))})。 <small>JD2 のウィンドウで解いてください。解けば自動で再開します。</small>`);
     }
     const waiting = list.filter((j) => j.status === 'waiting_human');
+    const btn = (j) => (remoteable(j) ? ` <button type="button" class="sm" data-remote="${esc(j.id)}"><i class="fa-solid fa-mobile-screen"></i> ここで操作</button>` : '');
     if (waiting.length === 1) {
-      lines.push(`${esc(hostOf(waiting[0].url))} の人間判定を待っています。 <small>ブラウザのウィンドウで通してください。通れば自動で続きます。</small>`);
+      lines.push(`${esc(hostOf(waiting[0].url))} の人間判定を待っています。 <small>ブラウザのウィンドウで通してください。通れば自動で続きます。</small>${btn(waiting[0])}`);
     } else if (waiting.length > 1) {
-      lines.push(`${waiting.length} 件のジョブが人間の操作を待っています。 <small>ブラウザのウィンドウで通してください。通れば自動で続きます。</small>`);
+      lines.push(`${waiting.length} 件のジョブが人間の操作を待っています。 <small>ブラウザのウィンドウで通してください。通れば自動で続きます。</small>${btn(waiting[0])}`);
     }
     b.hidden = lines.length === 0;
     b.innerHTML = lines.map((l) => `<div class="line"><span class="tag">要対応</span><span>${l}</span></div>`).join('');
+    for (const el of b.querySelectorAll('[data-remote]')) el.onclick = () => openRemote(el.dataset.remote);
+  }
+
+  // ---- 遠隔操作 ----------------------------------------------------------
+  //
+  // 母艦 PC のブラウザのタブを画面に映し、タップをクリックとして送り返す。
+  // 画面は 1 枚撮っては次を取りに行く (動画ではなくコマ送り)。操作した直後はすぐ撮り直す。
+
+  const remote = { id: null, seq: 0, w: 0, h: 0, kick: null };
+
+  function openRemote(id) {
+    remote.id = id;
+    remote.seq++;
+    $('remoteImg').removeAttribute('src');
+    remoteText();
+    $('remoteDialog').showModal();
+    remoteLoop(remote.seq);
+  }
+
+  function closeRemote() {
+    remote.id = null;
+    remote.seq++;
+    if ($('remoteDialog').open) $('remoteDialog').close();
+    if (location.hash.startsWith('#remote=')) history.replaceState(null, '', location.pathname);
+  }
+
+  /** 見出しと案内文をジョブの今の状態に合わせる */
+  function remoteText() {
+    const job = remote.id && state.jobs.get(remote.id);
+    $('remoteTitle').textContent = job ? hostOf(job.url) : '';
+    let note = '';
+    if (!job) note = 'ジョブが見つかりません';
+    else if (job.status === 'waiting_human') note = (job.meta && job.meta.humanDetail) || '人間の操作が必要です';
+    else if (job.status === 'downloading') note = (job.meta && job.meta.detail) || '自動操作中';
+    else note = `${STATUS_LABEL[job.status] || job.status}。この画面は閉じて大丈夫です`;
+    $('remoteNote').textContent = note;
+  }
+
+  async function remoteLoop(seq) {
+    let first = true;
+    while (seq === remote.seq) {
+      try {
+        const res = await fetch(`/api/jobs/${remote.id}/screen${first ? '?front=1' : ''}`, { cache: 'no-store' });
+        if (seq !== remote.seq) return;
+        if (!res.ok) { remoteText(); $('remoteNote').textContent += ' (ブラウザのタブはもう開いていません)'; return; }
+        remote.w = Number(res.headers.get('X-Css-Width')) || 0;
+        remote.h = Number(res.headers.get('X-Css-Height')) || 0;
+        const url = URL.createObjectURL(await res.blob());
+        const img = $('remoteImg');
+        const old = img.src;
+        img.src = url;
+        if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+        first = false;
+      } catch { /* 通信の瞬断。次で取り直す */ }
+      // 操作があれば待たずに撮り直す
+      await new Promise((r) => { remote.kick = r; setTimeout(r, 800); });
+    }
+  }
+
+  async function remoteSend(ev) {
+    if (!remote.id) return;
+    try {
+      await api('POST', `/api/jobs/${remote.id}/input`, ev);
+    } catch (e) { toast(e.message, 'warn'); }
+    // 押した結果が描かれるまで少し待ってから撮る
+    setTimeout(() => remote.kick && remote.kick(), 250);
+  }
+
+  /** 画像上の位置を、ページの CSS ピクセルに直す */
+  function remotePoint(e) {
+    const r = $('remoteImg').getBoundingClientRect();
+    return { x: ((e.clientX - r.left) / r.width) * remote.w, y: ((e.clientY - r.top) / r.height) * remote.h };
+  }
+
+  $('remoteImg').addEventListener('click', (e) => {
+    if (!remote.w) return;
+    remoteSend({ type: 'tap', ...remotePoint(e) });
+  });
+  $('remoteClose').onclick = closeRemote;
+  $('remoteDialog').addEventListener('close', () => { if (remote.id) closeRemote(); });
+  $('remoteText').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); $('remoteDialog').querySelector('[data-rkey=send]').click(); }
+  });
+  for (const b of $('remoteDialog').querySelectorAll('[data-rkey]')) {
+    b.onclick = () => {
+      const k = b.dataset.rkey;
+      if (k === 'send') {
+        const text = $('remoteText').value;
+        if (!text) return;
+        $('remoteText').value = '';
+        remoteSend({ type: 'text', text });
+      } else if (k === 'up' || k === 'down') {
+        remoteSend({ type: 'scroll', x: remote.w / 2, y: remote.h / 2, dy: (k === 'up' ? -0.6 : 0.6) * remote.h });
+      } else if (k === 'reload') {
+        remoteSend({ type: 'reload' });
+      } else {
+        remoteSend({ type: 'key', key: k });
+      }
+    };
   }
 
   // ---- CivitAI の確認カード ----------------------------------------------

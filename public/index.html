@@ -137,6 +137,29 @@
     </form>
   </dialog>
 
+  <!-- ブラウザのタブを遠隔で操作する。人間判定をスマホから通すため -->
+  <dialog id="remoteDialog" class="remote">
+    <div class="rhead">
+      <span id="remoteTitle" class="rtitle"></span>
+      <button type="button" id="remoteClose" class="quiet sm" aria-label="閉じる"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <p id="remoteNote" class="rnote"></p>
+    <div class="rscreen"><img id="remoteImg" alt="ブラウザの画面"></div>
+    <div class="rkeys">
+      <input id="remoteText" type="text" placeholder="文字を送る" autocomplete="off" autocapitalize="off">
+      <button type="button" class="sm" data-rkey="send">送信</button>
+      <button type="button" class="sm" data-rkey="Enter">Enter</button>
+      <button type="button" class="sm" data-rkey="Backspace" aria-label="1 文字消す"><i class="fa-solid fa-delete-left"></i></button>
+    </div>
+    <div class="rkeys">
+      <button type="button" class="sm" data-rkey="up" aria-label="上へ"><i class="fa-solid fa-arrow-up"></i></button>
+      <button type="button" class="sm" data-rkey="down" aria-label="下へ"><i class="fa-solid fa-arrow-down"></i></button>
+      <button type="button" class="sm" data-rkey="Tab">Tab</button>
+      <span class="spacer"></span>
+      <button type="button" class="quiet sm" data-rkey="reload"><i class="fa-solid fa-rotate-right"></i> 再読み込み</button>
+    </div>
+  </dialog>
+
   <footer class="log">
     <button type="button" id="btnLog" class="quiet sm"><i class="fa-solid fa-terminal"></i> ログを見る</button>
     <pre id="log" hidden></pre>

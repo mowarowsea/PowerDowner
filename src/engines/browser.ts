@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BrowserContext, Page, Download, Route } from 'playwright-core';
+import type { BrowserContext, CDPSession, Page, Download, Route } from 'playwright-core';
 import type { Config } from '../config.js';
 import type { Job, EngineStatus, ResolvedDownload } from '../types.js';
 import { bus, log } from '../events.js';
@@ -35,6 +35,14 @@ export interface BrowserCallbacks {
    */
   onSiteWait(jobId: string, resumeAt: number, reason: string): boolean;
 }
+
+/** スマホの遠隔操作画面から来る操作。座標は CSS ピクセル */
+export type RemoteInput =
+  | { type: 'tap'; x: number; y: number }
+  | { type: 'text'; text: string }
+  | { type: 'key'; key: 'Enter' | 'Backspace' | 'Tab' | 'Escape' }
+  | { type: 'scroll'; x: number; y: number; dy: number }
+  | { type: 'reload' };
 
 interface Current {
   job: Job;
@@ -733,6 +741,71 @@ export class BrowserEngine {
     // shot=false ならページに触らない (人間判定の最中はスクリーンショットも取らない)
     const base = shot ? await this.debugDump(cur, '手動ダンプ') : '';
     return { url: cur.page.url(), files: base ? `${base}.html / .png` : '(取得せず)', blocked: [...cur.blocked], console: [...cur.console] };
+  }
+
+  // ---- 遠隔操作 (スマホから人間判定を通す) ---------------------------------
+  //
+  // 画面は CDP の Page.captureScreenshot で撮る。Playwright の page.screenshot はキャレットを
+  // 隠すスタイルをページに差し込むので、人間判定の最中に触るものを増やしたくない。
+  // 入力は page.mouse / keyboard (CDP の Input.dispatch*。isTrusted=true になり、iframe の中の
+  // Turnstile にも座標で届く)。
+
+  private cdp = new WeakMap<Page, CDPSession>();
+
+  private async cdpOf(page: Page): Promise<CDPSession> {
+    let s = this.cdp.get(page);
+    if (!s) {
+      s = await page.context().newCDPSession(page);
+      this.cdp.set(page, s);
+    }
+    return s;
+  }
+
+  /** 遠隔操作できるジョブか (いまブラウザでタブを開いている) */
+  remoteable(jobId: string): boolean {
+    const cur = this.current.get(jobId);
+    return !!cur && !cur.handled && !cur.page.isClosed();
+  }
+
+  /** いまの画面を JPEG で返す。width / height はクリック座標の基準になる CSS ピクセル */
+  async screen(jobId: string, front = false): Promise<{ jpeg: Buffer; width: number; height: number } | null> {
+    const cur = this.current.get(jobId);
+    if (!cur || cur.page.isClosed()) return null;
+    // 裏のタブは描画が止まって撮れないことがある。見始めた時だけ前に出す
+    if (front) await cur.page.bringToFront().catch(() => { /* ignore */ });
+    const s = await this.cdpOf(cur.page);
+    const m = await s.send('Page.getLayoutMetrics');
+    const vp = m.cssVisualViewport ?? m.visualViewport;
+    const shot = await s.send('Page.captureScreenshot', { format: 'jpeg', quality: 60 });
+    return { jpeg: Buffer.from(shot.data, 'base64'), width: Math.round(vp.clientWidth), height: Math.round(vp.clientHeight) };
+  }
+
+  /** スマホからの操作をページへ流す。x / y は CSS ピクセル */
+  async input(jobId: string, ev: RemoteInput): Promise<boolean> {
+    const cur = this.current.get(jobId);
+    if (!cur || cur.page.isClosed()) return false;
+    const { page } = cur;
+    await page.bringToFront().catch(() => { /* ignore */ });
+    if (ev.type === 'tap') {
+      // いきなり座標に現れて押すより、少し手前から動かしてくる方が人間判定に嫌われにくい
+      const fromX = Math.max(0, ev.x - 40 - Math.random() * 60);
+      const fromY = Math.max(0, ev.y - 20 - Math.random() * 40);
+      await page.mouse.move(fromX, fromY);
+      await page.mouse.move(ev.x, ev.y, { steps: 8 + Math.floor(Math.random() * 6) });
+      await page.mouse.down();
+      await sleep(60 + Math.random() * 80);
+      await page.mouse.up();
+    } else if (ev.type === 'text') {
+      await page.keyboard.type(ev.text, { delay: 40 });
+    } else if (ev.type === 'key') {
+      await page.keyboard.press(ev.key);
+    } else if (ev.type === 'scroll') {
+      await page.mouse.move(ev.x, ev.y);
+      await page.mouse.wheel(0, ev.dy);
+    } else if (ev.type === 'reload') {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => { /* ignore */ });
+    }
+    return true;
   }
 
   private async debugDump(cur: Current, reason: string): Promise<string> {
