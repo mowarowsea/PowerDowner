@@ -283,9 +283,11 @@
 
   function renderJobs() {
     const all = visibleJobs();
-    // 動いているものが埋もれないよう、完了は末尾へ回す (どちらも新しい順)
+    // 動いているものが埋もれないよう、完了は末尾へ回す (どちらも新しい順)。
+    // 完了は登録順ではなく落とし終わった順。doneAt が無い古いジョブは最終更新で代える
     const active = all.filter((j) => j.status !== 'done');
-    const done = all.filter((j) => j.status === 'done');
+    const doneAt = (j) => (j.meta && j.meta.doneAt) || j.updatedAt;
+    const done = all.filter((j) => j.status === 'done').sort((a, b) => (doneAt(a) < doneAt(b) ? 1 : -1));
     const list = state.showDone ? [...active, ...done] : active;
     const root = $('jobs');
     $('jobsEmpty').hidden = all.length > 0;

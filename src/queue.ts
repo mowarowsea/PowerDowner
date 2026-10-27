@@ -241,7 +241,8 @@ export class Queue {
         : cur.bytesTotal > 0 ? cur.bytesTotal : cur.bytesDone,
       speed: 0,
       error: null,
-      meta: { detail: '', humanDetail: '' },
+      // 完了一覧はこの時刻順に並べる。updatedAt は完了後も (画像の取り直しなどで) 動く
+      meta: { detail: '', humanDetail: '', doneAt: new Date().toISOString() },
     });
     // 実ファイルを確認した後にだけ数える。エンジンの「終わった」で数えると、
     // 0 バイトや HTML を掴まされたアップローダが優良に見えてしまう
