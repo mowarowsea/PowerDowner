@@ -258,6 +258,28 @@ katfile の Cloudflare Turnstile は **Playwright では通せない**。ペー�
 ダウンロードボタンのリンクをコピーして PowerDowner に貼る。あとは aria2 が分割・再開付きで落とす。
 ブラウザに直接落とさせるより、この方が「途切れない」という要件に合う。
 
+### 試している対策: rebrowser-patches (2026-10-28〜)
+
+上のデバッガ検出は、Playwright が各フレームで CDP の `Runtime.enable` を叩くせいで起きる
+(console の引数が DevTools 側で直列化され、ページから見える)。これを塞ぐ改造版が
+[rebrowser-patches](https://github.com/rebrowser/rebrowser-patches) で、`Runtime.enable` を呼ばずに
+実行コンテキストを手で作る。Cloudflare / DataDome がこの検出を使っているのは公式にも書いてある。
+
+`package.json` では npm の alias で `playwright-core` をその drop-in (`rebrowser-playwright-core`) に
+差し替えてある。`import ... from 'playwright-core'` はそのまま。版は元の playwright-core に合わせる
+(1.64.1 → 1.64.101)。
+
+- **確かめ方**: `npm install` してから katfile.co / rapidgator を投入し、Turnstile のチェックを押す。
+  「Verification failed」にならず先へ進めば効いている
+- **効かなかったら**: 環境変数 `REBROWSER_PATCHES_RUNTIME_FIX_MODE=0` でパッチを無効にできる (入れ替え不要)。
+  `REBROWSER_PATCHES_DEBUG=1` でパッチのログが出る。`addBinding` (既定) で駄目なページは
+  `REBROWSER_PATCHES_RUNTIME_FIX_MODE=alwaysIsolated` も試す (ページの JS 変数には触れなくなるが、
+  ドライバは DOM しか見ていないので動くはず)。元に戻すなら `npm install playwright-core@^1.64.0`
+- **分かっている副作用**: `Runtime.enable` を呼ばないので `page.on('console')` が届かなくなる可能性がある。
+  browser.ts はこれを 2 つに使っている — 潰したポップアップの数 (`__pd_popup_blocked`。`adGuardHosts` の
+  dailyuploads で `clickPersistently` の空振り判定に使う) と、Turnstile の失敗コードの記録 (ダンプ用)。
+  パッチが効くと分かったら、前者は `page.exposeBinding` に置き換える
+
 ## ジョブ一覧の見え方
 
 行にはファイル名の下にホスト名 (`katfile.biz` など) とエンジンのチップ (aria2 / JD2 / ブラウザ) が出る。
